@@ -3,6 +3,7 @@ package mimo_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -89,5 +90,10 @@ func TestClientReturnsHTTPErrorBody(t *testing.T) {
 	})
 	if _, err := client.TranscribeDataURL(context.Background(), "data:audio/wav;base64,AAAA", "auto"); err == nil {
 		t.Fatal("TranscribeDataURL returned nil error")
+	} else {
+		var httpErr mimo.HTTPError
+		if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusBadRequest {
+			t.Fatalf("error = %T %v", err, err)
+		}
 	}
 }

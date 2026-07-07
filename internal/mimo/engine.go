@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,8 @@ import (
 	"github.com/aweffr/easy-asr-cli/internal/srt"
 	"github.com/aweffr/easy-asr-cli/internal/vad"
 )
+
+const defaultRequestStartDelay = 10 * time.Second
 
 type SegmentProcessor interface {
 	Prepare(ctx context.Context, path string) ([]audio.PreparedSegment, error)
@@ -34,6 +37,7 @@ type EngineOptions struct {
 	Client            ASRClient
 	MaxConcurrency    int
 	RequestStartDelay time.Duration
+	RetryBackoffs     []time.Duration
 }
 
 type Engine struct {
@@ -42,6 +46,7 @@ type Engine struct {
 	client            ASRClient
 	maxConcurrency    int
 	requestStartDelay time.Duration
+	retryBackoffs     []time.Duration
 }
 
 type rawWrapper struct {
@@ -70,6 +75,7 @@ func NewEngine(options EngineOptions) *Engine {
 		client:            options.Client,
 		maxConcurrency:    options.MaxConcurrency,
 		requestStartDelay: options.RequestStartDelay,
+		retryBackoffs:     append([]time.Duration(nil), options.RetryBackoffs...),
 	}
 }
 
@@ -207,7 +213,7 @@ func (e *Engine) transcribeSegments(ctx context.Context, segments []audio.Prepar
 		startDelay = 0
 	}
 	if e.requestStartDelay == 0 {
-		startDelay = time.Second
+		startDelay = defaultRequestStartDelay
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -218,34 +224,42 @@ func (e *Engine) transcribeSegments(ctx context.Context, segments []audio.Prepar
 	var wg sync.WaitGroup
 	errCh := make(chan error, 1)
 	for i, segment := range segments {
+		select {
+		case err := <-errCh:
+			cancel()
+			wg.Wait()
+			return responses, err
+		default:
+		}
+		dataURL, err := wavDataURL(segment.Path)
+		if err != nil {
+			cancel()
+			wg.Wait()
+			return responses, err
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			wg.Wait()
+			return responses, ctx.Err()
+		}
+		if err := limiter.Wait(ctx); err != nil {
+			<-sem
+			wg.Wait()
+			return responses, err
+		}
 		wg.Add(1)
-		go func(i int, segment audio.PreparedSegment) {
+		go func(i int, segment audio.PreparedSegment, dataURL string) {
 			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				responses[i] = segmentResponse{segment: segment, err: ctx.Err()}
-				return
-			}
 			defer func() { <-sem }()
-			dataURL, err := wavDataURL(segment.Path)
-			if err != nil {
-				responses[i] = segmentResponse{segment: segment, err: err}
-				sendFirstError(errCh, cancel, err)
-				return
-			}
-			if err := limiter.Wait(ctx); err != nil {
-				responses[i] = segmentResponse{segment: segment, err: err}
-				return
-			}
-			response, err := e.client.TranscribeDataURL(ctx, dataURL, language)
+			response, err := e.transcribeDataURLWithRetry(ctx, dataURL, language)
 			if err != nil {
 				responses[i] = segmentResponse{segment: segment, err: err}
 				sendFirstError(errCh, cancel, err)
 				return
 			}
 			responses[i] = segmentResponse{segment: segment, response: response}
-		}(i, segment)
+		}(i, segment, dataURL)
 	}
 	wg.Wait()
 	select {
@@ -253,6 +267,46 @@ func (e *Engine) transcribeSegments(ctx context.Context, segments []audio.Prepar
 		return responses, err
 	default:
 		return responses, nil
+	}
+}
+
+func (e *Engine) transcribeDataURLWithRetry(ctx context.Context, dataURL string, language string) (TranscriptionResponse, error) {
+	backoffs := e.retryBackoffs
+	if backoffs == nil {
+		backoffs = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
+	}
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		response, err := e.client.TranscribeDataURL(ctx, dataURL, language)
+		if err == nil {
+			return response, nil
+		}
+		lastErr = err
+		if !isRetryable429(err) || attempt >= len(backoffs) {
+			return TranscriptionResponse{}, lastErr
+		}
+		if err := sleepContext(ctx, backoffs[attempt]); err != nil {
+			return TranscriptionResponse{}, err
+		}
+	}
+}
+
+func isRetryable429(err error) bool {
+	var httpErr HTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == 429
+}
+
+func sleepContext(ctx context.Context, duration time.Duration) error {
+	if duration <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

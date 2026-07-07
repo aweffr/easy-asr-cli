@@ -43,9 +43,11 @@ func TestEngineTranscribesSegmentsWritesRawWrapperAndSRTLabels(t *testing.T) {
 		{ID: "r2", Content: "第二段", FinishReason: "length", UsageSeconds: 179, Raw: map[string]any{"id": "r2"}},
 	}}
 	runner := mimo.NewEngine(mimo.EngineOptions{
-		Config:    validMimoConfig(),
-		Processor: processor,
-		Client:    client,
+		Config:            validMimoConfig(),
+		Processor:         processor,
+		Client:            client,
+		MaxConcurrency:    1,
+		RequestStartDelay: -1,
 	})
 
 	result, err := runner.Transcribe(context.Background(), engine.Request{
@@ -138,6 +140,7 @@ func TestEngineRunsMimoRequestsWithBoundedParallelismAndOrderedOutput(t *testing
 		Client:            client,
 		MaxConcurrency:    2,
 		RequestStartDelay: 5 * time.Millisecond,
+		RetryBackoffs:     []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond},
 	})
 	outPath := filepath.Join(dir, "out.srt")
 	rawPath := filepath.Join(dir, "raw.json")
@@ -180,6 +183,41 @@ func TestEngineRunsMimoRequestsWithBoundedParallelismAndOrderedOutput(t *testing
 	}
 }
 
+func TestEngineRetriesMimoHTTP429WithBackoff(t *testing.T) {
+	dir := t.TempDir()
+	audioPath := filepath.Join(dir, "input.mp3")
+	segmentPath := filepath.Join(dir, "part.wav")
+	if err := os.WriteFile(audioPath, []byte("audio"), 0o600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	if err := os.WriteFile(segmentPath, []byte("part"), 0o600); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	client := &retryMimoClient{failures: 2}
+	runner := mimo.NewEngine(mimo.EngineOptions{
+		Config:            validMimoConfig(),
+		Processor:         &fakeProcessor{segments: []audio.PreparedSegment{{Index: 1, Total: 1, Start: 0, End: time.Second, Path: segmentPath}}},
+		Client:            client,
+		MaxConcurrency:    1,
+		RequestStartDelay: -1,
+		RetryBackoffs:     []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond},
+	})
+
+	result, err := runner.Transcribe(context.Background(), engine.Request{
+		AudioPath:  audioPath,
+		OutputPath: filepath.Join(dir, "out.srt"),
+	})
+	if err != nil {
+		t.Fatalf("Transcribe returned error: %v", err)
+	}
+	if client.calls != 3 {
+		t.Fatalf("calls = %d, want 3", client.calls)
+	}
+	if result.UsageSeconds != 1 {
+		t.Fatalf("UsageSeconds = %d", result.UsageSeconds)
+	}
+}
+
 type fakeProcessor struct {
 	segments []audio.PreparedSegment
 	cleaned  bool
@@ -215,6 +253,19 @@ type parallelMimoClient struct {
 	maxActive int
 	starts    []time.Time
 	responses map[string]mimo.TranscriptionResponse
+}
+
+type retryMimoClient struct {
+	calls    int
+	failures int
+}
+
+func (r *retryMimoClient) TranscribeDataURL(ctx context.Context, dataURL string, language string) (mimo.TranscriptionResponse, error) {
+	r.calls++
+	if r.calls <= r.failures {
+		return mimo.TranscriptionResponse{}, mimo.HTTPError{StatusCode: 429, Body: "too many requests"}
+	}
+	return mimo.TranscriptionResponse{Content: "ok", FinishReason: "stop", UsageSeconds: 1, Raw: map[string]any{"ok": true}}, nil
 }
 
 func (p *parallelMimoClient) TranscribeDataURL(ctx context.Context, dataURL string, language string) (mimo.TranscriptionResponse, error) {

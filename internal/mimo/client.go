@@ -35,6 +35,15 @@ type TranscriptionResponse struct {
 	Raw          map[string]any
 }
 
+type HTTPError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e HTTPError) Error() string {
+	return fmt.Sprintf("mimo request failed with HTTP %d: %s", e.StatusCode, e.Body)
+}
+
 func NewClient(options ClientOptions) *Client {
 	timeout := options.RequestTimeout
 	if timeout <= 0 {
@@ -100,7 +109,7 @@ func (c *Client) TranscribeDataURL(ctx context.Context, dataURL string, language
 		return TranscriptionResponse{}, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return TranscriptionResponse{}, fmt.Errorf("mimo request failed with HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return TranscriptionResponse{}, HTTPError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(respBody))}
 	}
 	var raw map[string]any
 	if err := json.Unmarshal(respBody, &raw); err != nil {
