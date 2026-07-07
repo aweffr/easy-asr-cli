@@ -20,7 +20,7 @@ import (
 	"github.com/aweffr/easy-asr-cli/internal/vad"
 )
 
-const defaultRequestStartDelay = 10 * time.Second
+const defaultRequestStartDelay = 8 * time.Second
 
 type SegmentProcessor interface {
 	Prepare(ctx context.Context, path string) ([]audio.PreparedSegment, error)
