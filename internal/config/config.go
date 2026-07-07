@@ -14,10 +14,13 @@ import (
 const (
 	EngineQwen3Filetrans = "qwen3-asr-flash-filetrans"
 	EngineFunASR         = "fun-asr"
+	EngineMimoV25ASR     = "mimo-v2.5-asr"
 
-	defaultBaseURL  = "https://dashscope.aliyuncs.com/api/v1"
-	defaultModel    = EngineQwen3Filetrans
-	defaultFunModel = EngineFunASR
+	defaultBaseURL     = "https://dashscope.aliyuncs.com/api/v1"
+	defaultMimoBaseURL = "https://api.xiaomimimo.com/v1"
+	defaultModel       = EngineQwen3Filetrans
+	defaultFunModel    = EngineFunASR
+	defaultMimoModel   = EngineMimoV25ASR
 )
 
 type UsageError struct {
@@ -41,6 +44,7 @@ type Config struct {
 type EnginesConfig struct {
 	Qwen3ASRFlashFiletrans Qwen3Config  `yaml:"qwen3_asr_flash_filetrans" json:"qwen3_asr_flash_filetrans"`
 	FunASR                 FunASRConfig `yaml:"fun_asr" json:"fun_asr"`
+	MiMoV25ASR             MiMoConfig   `yaml:"mimo_v2_5_asr" json:"mimo_v2_5_asr"`
 }
 
 type ReservedConfig struct {
@@ -63,6 +67,35 @@ type ResolvedFunASRConfig struct {
 	DashScope DashScopeConfig   `json:"dashscope"`
 	OSS       OSSConfig         `json:"oss"`
 	ASR       ResolvedFunASRASR `json:"asr"`
+}
+
+type MiMoConfig struct {
+	MiMo         MiMoAPIConfig          `yaml:"mimo" json:"mimo"`
+	ASR          MiMoASRConfig          `yaml:"asr" json:"asr"`
+	Segmentation MiMoSegmentationConfig `yaml:"segmentation" json:"segmentation"`
+}
+
+type MiMoAPIConfig struct {
+	APIKey  string `yaml:"api_key" json:"api_key"`
+	BaseURL string `yaml:"base_url" json:"base_url"`
+	Model   string `yaml:"model" json:"model"`
+}
+
+type MiMoASRConfig struct {
+	Language       string        `yaml:"language" json:"language"`
+	RequestTimeout time.Duration `yaml:"request_timeout" json:"request_timeout"`
+}
+
+type MiMoSegmentationConfig struct {
+	TargetDuration         time.Duration `yaml:"target_duration" json:"target_duration"`
+	MinDuration            time.Duration `yaml:"min_duration" json:"min_duration"`
+	MaxDuration            time.Duration `yaml:"max_duration" json:"max_duration"`
+	VADThreshold           float32       `yaml:"vad_threshold" json:"vad_threshold"`
+	MinSilence             time.Duration `yaml:"min_silence" json:"min_silence"`
+	SpeechPad              time.Duration `yaml:"speech_pad" json:"speech_pad"`
+	ModelPath              string        `yaml:"model_path" json:"model_path"`
+	ONNXRuntimeLibraryPath string        `yaml:"onnx_runtime_library_path" json:"onnx_runtime_library_path"`
+	TempDir                string        `yaml:"temp_dir,omitempty" json:"temp_dir,omitempty"`
 }
 
 func (f FunASRConfig) MarshalYAML() (any, error) {
@@ -363,6 +396,128 @@ func (a FunASRConfigASR) MarshalYAML() (any, error) {
 	return out, nil
 }
 
+func (a *MiMoASRConfig) UnmarshalYAML(value *yaml.Node) error {
+	type raw struct {
+		Language       string `yaml:"language"`
+		RequestTimeout string `yaml:"request_timeout"`
+	}
+	var r raw
+	if err := value.Decode(&r); err != nil {
+		return err
+	}
+	if r.Language != "" {
+		a.Language = r.Language
+	}
+	if r.RequestTimeout != "" {
+		duration, err := time.ParseDuration(r.RequestTimeout)
+		if err != nil {
+			return fmt.Errorf("parse asr.request_timeout: %w", err)
+		}
+		a.RequestTimeout = duration
+	}
+	return nil
+}
+
+func (a MiMoASRConfig) MarshalYAML() (any, error) {
+	return struct {
+		Language       string `yaml:"language"`
+		RequestTimeout string `yaml:"request_timeout"`
+	}{
+		Language:       a.Language,
+		RequestTimeout: a.RequestTimeout.String(),
+	}, nil
+}
+
+func (s *MiMoSegmentationConfig) UnmarshalYAML(value *yaml.Node) error {
+	type raw struct {
+		TargetDuration         string  `yaml:"target_duration"`
+		MinDuration            string  `yaml:"min_duration"`
+		MaxDuration            string  `yaml:"max_duration"`
+		VADThreshold           float32 `yaml:"vad_threshold"`
+		MinSilence             string  `yaml:"min_silence"`
+		SpeechPad              string  `yaml:"speech_pad"`
+		ModelPath              string  `yaml:"model_path"`
+		ONNXRuntimeLibraryPath string  `yaml:"onnx_runtime_library_path"`
+		TempDir                string  `yaml:"temp_dir"`
+	}
+	var r raw
+	if err := value.Decode(&r); err != nil {
+		return err
+	}
+	parse := func(name, value string) (time.Duration, error) {
+		if value == "" {
+			return 0, nil
+		}
+		duration, err := time.ParseDuration(value)
+		if err != nil {
+			return 0, fmt.Errorf("parse segmentation.%s: %w", name, err)
+		}
+		return duration, nil
+	}
+	if duration, err := parse("target_duration", r.TargetDuration); err != nil {
+		return err
+	} else if duration > 0 {
+		s.TargetDuration = duration
+	}
+	if duration, err := parse("min_duration", r.MinDuration); err != nil {
+		return err
+	} else if duration > 0 {
+		s.MinDuration = duration
+	}
+	if duration, err := parse("max_duration", r.MaxDuration); err != nil {
+		return err
+	} else if duration > 0 {
+		s.MaxDuration = duration
+	}
+	if r.VADThreshold != 0 {
+		s.VADThreshold = r.VADThreshold
+	}
+	if duration, err := parse("min_silence", r.MinSilence); err != nil {
+		return err
+	} else if duration > 0 {
+		s.MinSilence = duration
+	}
+	if duration, err := parse("speech_pad", r.SpeechPad); err != nil {
+		return err
+	} else if duration > 0 {
+		s.SpeechPad = duration
+	}
+	if r.ModelPath != "" {
+		s.ModelPath = r.ModelPath
+	}
+	if r.ONNXRuntimeLibraryPath != "" {
+		s.ONNXRuntimeLibraryPath = r.ONNXRuntimeLibraryPath
+	}
+	if r.TempDir != "" {
+		s.TempDir = r.TempDir
+	}
+	return nil
+}
+
+func (s MiMoSegmentationConfig) MarshalYAML() (any, error) {
+	return struct {
+		TargetDuration         string  `yaml:"target_duration"`
+		MinDuration            string  `yaml:"min_duration"`
+		MaxDuration            string  `yaml:"max_duration"`
+		VADThreshold           float32 `yaml:"vad_threshold"`
+		MinSilence             string  `yaml:"min_silence"`
+		SpeechPad              string  `yaml:"speech_pad"`
+		ModelPath              string  `yaml:"model_path,omitempty"`
+		ONNXRuntimeLibraryPath string  `yaml:"onnx_runtime_library_path,omitempty"`
+		TempDir                string  `yaml:"temp_dir,omitempty"`
+	}{
+		TargetDuration:         s.TargetDuration.String(),
+		MinDuration:            s.MinDuration.String(),
+		MaxDuration:            s.MaxDuration.String(),
+		VADThreshold:           s.VADThreshold,
+		MinSilence:             s.MinSilence.String(),
+		SpeechPad:              s.SpeechPad.String(),
+		ModelPath:              s.ModelPath,
+		ONNXRuntimeLibraryPath: s.ONNXRuntimeLibraryPath,
+		TempDir:                s.TempDir,
+	}, nil
+}
+
 func DefaultPath() (string, error) {
 	if value := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); value != "" {
 		return filepath.Join(value, "easy_asr", "config.yaml"), nil
@@ -405,6 +560,24 @@ func Default() *Config {
 				},
 				ASR: FunASRConfigASR{
 					DiarizationEnabled: &diarizationEnabled,
+				},
+			},
+			MiMoV25ASR: MiMoConfig{
+				MiMo: MiMoAPIConfig{
+					BaseURL: defaultMimoBaseURL,
+					Model:   defaultMimoModel,
+				},
+				ASR: MiMoASRConfig{
+					Language:       "auto",
+					RequestTimeout: 5 * time.Minute,
+				},
+				Segmentation: MiMoSegmentationConfig{
+					TargetDuration: 3 * time.Minute,
+					MinDuration:    150 * time.Second,
+					MaxDuration:    210 * time.Second,
+					VADThreshold:   0.5,
+					MinSilence:     100 * time.Millisecond,
+					SpeechPad:      30 * time.Millisecond,
 				},
 			},
 		},
@@ -537,12 +710,19 @@ func (c *Config) FunASR() *ResolvedFunASRConfig {
 	return resolved
 }
 
+func (c *Config) MiMoV25ASR() *MiMoConfig {
+	return &c.Engines.MiMoV25ASR
+}
+
 func (c *Config) Validate() error {
 	if strings.TrimSpace(c.Engine) == "" {
 		return UsageError{Message: "engine is required"}
 	}
-	if c.Engine != EngineQwen3Filetrans && c.Engine != EngineFunASR {
+	if c.Engine != EngineQwen3Filetrans && c.Engine != EngineFunASR && c.Engine != EngineMimoV25ASR {
 		return UsageError{Message: fmt.Sprintf("engine %q is not implemented", c.Engine)}
+	}
+	if c.Engine == EngineMimoV25ASR {
+		return validateMiMo(c.MiMoV25ASR())
 	}
 	if c.Engine == EngineFunASR {
 		fun := c.FunASR()
@@ -553,6 +733,39 @@ func (c *Config) Validate() error {
 	}
 	qwen := c.Qwen3()
 	return validateDashScopeStorage(qwen.DashScope, qwen.OSS)
+}
+
+func validateMiMo(mimo *MiMoConfig) error {
+	missing := []string{}
+	check := func(name, value string) {
+		if strings.TrimSpace(value) == "" {
+			missing = append(missing, name)
+		}
+	}
+	check("mimo.api_key", mimo.MiMo.APIKey)
+	check("mimo.base_url", mimo.MiMo.BaseURL)
+	check("mimo.model", mimo.MiMo.Model)
+	if len(missing) > 0 {
+		return UsageError{Message: "missing required config: " + strings.Join(missing, ", ")}
+	}
+	switch mimo.ASR.Language {
+	case "", "auto", "zh", "en":
+	default:
+		return UsageError{Message: "mimo_v2_5_asr.asr.language must be one of auto, zh, en"}
+	}
+	if mimo.ASR.RequestTimeout <= 0 {
+		return UsageError{Message: "mimo_v2_5_asr.asr.request_timeout must be positive"}
+	}
+	if mimo.Segmentation.TargetDuration <= 0 || mimo.Segmentation.MinDuration <= 0 || mimo.Segmentation.MaxDuration <= 0 {
+		return UsageError{Message: "mimo_v2_5_asr.segmentation durations must be positive"}
+	}
+	if mimo.Segmentation.MinDuration > mimo.Segmentation.TargetDuration || mimo.Segmentation.TargetDuration > mimo.Segmentation.MaxDuration {
+		return UsageError{Message: "mimo_v2_5_asr.segmentation must satisfy min_duration <= target_duration <= max_duration"}
+	}
+	if mimo.Segmentation.VADThreshold <= 0 || mimo.Segmentation.VADThreshold >= 1 {
+		return UsageError{Message: "mimo_v2_5_asr.segmentation.vad_threshold must be between 0 and 1"}
+	}
+	return nil
 }
 
 func validateFunASR(fun *ResolvedFunASRConfig) error {
@@ -596,6 +809,7 @@ func (c *Config) Redacted() *Config {
 	copy.Engines.FunASR.DashScope.APIKey = redactSecret(copy.Engines.FunASR.DashScope.APIKey)
 	copy.Engines.FunASR.OSS.AccessKeyID = redactID(copy.Engines.FunASR.OSS.AccessKeyID)
 	copy.Engines.FunASR.OSS.AccessKeySecret = redactSecret(copy.Engines.FunASR.OSS.AccessKeySecret)
+	copy.Engines.MiMoV25ASR.MiMo.APIKey = redactSecret(copy.Engines.MiMoV25ASR.MiMo.APIKey)
 	return &copy
 }
 
@@ -630,6 +844,22 @@ func (c *Config) applyEnv() {
 	}
 	if value := firstEnv("EASY_ASR_OSS_KEY_PREFIX"); value != "" {
 		qwen.OSS.KeyPrefix = value
+	}
+	mimo := c.MiMoV25ASR()
+	if value := firstEnv("EASY_ASR_MIMO_API_KEY", "MIMO_API_KEY"); value != "" {
+		mimo.MiMo.APIKey = value
+	}
+	if value := firstEnv("EASY_ASR_MIMO_BASE_URL"); value != "" {
+		mimo.MiMo.BaseURL = value
+	}
+	if value := firstEnv("EASY_ASR_MIMO_MODEL"); value != "" {
+		mimo.MiMo.Model = value
+	}
+	if value := firstEnv("EASY_ASR_SILERO_VAD_MODEL"); value != "" {
+		mimo.Segmentation.ModelPath = value
+	}
+	if value := firstEnv("EASY_ASR_ONNXRUNTIME_LIBRARY"); value != "" {
+		mimo.Segmentation.ONNXRuntimeLibraryPath = value
 	}
 }
 

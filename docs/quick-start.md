@@ -1,11 +1,12 @@
 # easy_asr 快速开始
 
-`easy_asr` 是本机音频转字幕 CLI，用于把本地音频文件上传到对象存储后调用 ASR 引擎转写，并生成 `.srt` 字幕文件。
+`easy_asr` 是本机音频转字幕 CLI，用于调用 ASR 引擎转写本地录音文件，并生成 `.srt` 字幕文件。
 
 当前已实现的引擎：
 
-- `qwen3-asr-flash-filetrans`：默认引擎。
-- `fun-asr`：DashScope 异步 Fun-ASR 录音文件识别。
+- `qwen3-asr-flash-filetrans`：默认引擎，参考价约 ¥0.79/hour。
+- `fun-asr`：DashScope 异步 Fun-ASR 录音文件识别，参考价约 ¥0.79/hour。
+- `mimo-v2.5-asr`：小米 MiMo V2.5 ASR，本地 VAD 分段后提交，参考价约 ¥0.50/hour。
 
 ## 安装位置
 
@@ -70,6 +71,16 @@ Fun-ASR 默认开启说话人分离；如果结果包含 `speaker_id`，SRT cue 
 easy_asr transcribe input.mp3 --engine fun-asr --no-diarization
 ```
 
+使用 MiMo V2.5 ASR：
+
+```zsh
+easy_asr assets install
+easy_asr doctor
+easy_asr transcribe input.mp3 --engine mimo-v2.5-asr
+```
+
+MiMo engine 会把音频切成约 180 秒的 16 kHz mono WAV 片段，使用 Silero VAD v6 寻找 150 到 210 秒之间的断点，并用 data URL 调用 MiMo API。SRT 会按原音频时间轴输出，每条 cue 带 `[PART i/N HH:MM:SS-HH:MM:SS]` 标签。
+
 命令成功时，stdout 只输出生成的字幕文件绝对路径，方便脚本或 Agent 读取。
 
 指定输出文件：
@@ -114,6 +125,8 @@ easy_asr transcribe /absolute/path/audio.mp3 --json
 - `transcription_url`：结果 URL，query 已脱敏
 - `usage_seconds`：ASR 计费/处理时长
 - `cleanup_error`：临时对象清理失败时才出现
+
+MiMo 的 `--raw-json` 是 wrapper 结构，包含总音频、每个 segment 的时间范围、每段 MiMo 原始 response 和累计 `usage_seconds`。
 
 默认模式下：
 

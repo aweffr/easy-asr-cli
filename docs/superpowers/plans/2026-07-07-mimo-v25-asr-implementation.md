@@ -27,3 +27,6 @@ Implement `mimo-v2.5-asr` with Silero VAD based local segmentation and data URL 
 
 - 180 second 16 kHz mono WAV data URL probe succeeded against MiMo.
 - 210 second 16 kHz mono WAV data URL is about 8.96 MB and remains below the 10 MB input limit.
+- MiMo ASR may return `finish_reason=length` with default generation parameters on noisy/sparse speech. The client pins `temperature: 0`, `top_p: 0.01`, and `max_tokens: 4096` for deterministic ASR output.
+- Full one-hour E2E completed with 20 segments, accumulated `usage_seconds=3625`, valid raw JSON wrapper, SRT part labels, and no leftover `/tmp/easy_asr-mimo-*` directories. Two noisy/sparse segments still returned `finish_reason=length`; the final implementation surfaces these as `warnings`, records each segment `finish_reason`, and marks affected SRT cues with `[TRUNCATED]`.
+- Code review findings addressed: `finish_reason=length` is no longer silent, VAD decoding streams chunks instead of buffering the full decoded audio, and Silero model download uses a pinned commit URL with SHA-256 verification, timeout, and a size cap.

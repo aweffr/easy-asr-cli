@@ -12,9 +12,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/aweffr/easy-asr-cli/internal/assets"
 	"github.com/aweffr/easy-asr-cli/internal/config"
 	"github.com/aweffr/easy-asr-cli/internal/engine"
 	"github.com/aweffr/easy-asr-cli/internal/funasr"
+	"github.com/aweffr/easy-asr-cli/internal/mimo"
 	"github.com/aweffr/easy-asr-cli/internal/qwen3"
 )
 
@@ -41,6 +43,8 @@ func NewRootCommand(deps Deps) *cobra.Command {
 	cmd.AddCommand(newTranscribeCommand(&state))
 	cmd.AddCommand(newEnginesCommand(&state))
 	cmd.AddCommand(newConfigCommand(&state))
+	cmd.AddCommand(newAssetsCommand(&state))
+	cmd.AddCommand(newDoctorCommand(&state))
 	cmd.AddCommand(newSchemaCommand(&state))
 	return cmd
 }
@@ -68,6 +72,7 @@ func fillDeps(deps Deps) Deps {
 			return engine.DefaultRegistry(
 				qwen3.NewEngine(qwen3.Options{Config: cfg.Qwen3()}),
 				funasr.NewEngine(funasr.Options{Config: cfg.FunASR()}),
+				mimo.NewEngine(mimo.EngineOptions{Config: cfg.MiMoV25ASR()}),
 			)
 		}
 	}
@@ -208,7 +213,7 @@ func newTranscribeCommand(state *rootState) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&opts.engine, "engine", "", "ASR engine")
+	cmd.Flags().StringVar(&opts.engine, "engine", "", "ASR engine: qwen3-asr-flash-filetrans (~¥0.79/hour), fun-asr (~¥0.79/hour), mimo-v2.5-asr (~¥0.50/hour)")
 	cmd.Flags().StringVarP(&opts.outputPath, "output", "o", "", "output SRT path")
 	cmd.Flags().BoolVar(&opts.stdout, "stdout", false, "write SRT content to stdout")
 	cmd.Flags().BoolVar(&opts.jsonOutput, "json", false, "write JSON run result to stdout")
@@ -333,6 +338,81 @@ func newConfigCommand(state *rootState) *cobra.Command {
 	return cmd
 }
 
+func newAssetsCommand(state *rootState) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "assets",
+		Short: "Manage local ASR assets",
+	}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "install",
+		Short: "Download local assets for MiMo VAD segmentation",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, _, err := state.loadConfig()
+			if err != nil {
+				return err
+			}
+			path, err := assets.InstallSileroVADModel(cmd.Context(), cfg.MiMoV25ASR().Segmentation.ModelPath)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(state.deps.Stdout, "silero vad model: %s\n", path)
+			return nil
+		},
+	})
+	return cmd
+}
+
+func newDoctorCommand(state *rootState) *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor",
+		Short: "Check local dependencies",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, _, err := state.loadConfig()
+			if err != nil {
+				return err
+			}
+			var missing []string
+			checkExecutable := func(name string) {
+				if err := assets.CheckExecutable(name); err != nil {
+					missing = append(missing, name)
+					fmt.Fprintf(state.deps.Stdout, "%s: missing\n", name)
+					return
+				}
+				fmt.Fprintf(state.deps.Stdout, "%s: ok\n", name)
+			}
+			checkExecutable("ffmpeg")
+			checkExecutable("ffprobe")
+
+			modelPath, err := assets.ResolveSileroVADModelPath(cfg.MiMoV25ASR().Segmentation.ModelPath)
+			if err != nil {
+				return err
+			}
+			if _, err := os.Stat(modelPath); err != nil {
+				missing = append(missing, "silero vad model")
+				fmt.Fprintf(state.deps.Stdout, "silero vad model: missing (%s)\n", modelPath)
+			} else {
+				fmt.Fprintf(state.deps.Stdout, "silero vad model: ok (%s)\n", modelPath)
+			}
+
+			runtimePath := assets.ResolveONNXRuntimeLibraryPath(cfg.MiMoV25ASR().Segmentation.ONNXRuntimeLibraryPath)
+			if runtimePath == "" {
+				missing = append(missing, "onnx runtime")
+				fmt.Fprintln(state.deps.Stdout, "onnx runtime: missing")
+			} else if _, err := os.Stat(runtimePath); err != nil {
+				missing = append(missing, "onnx runtime")
+				fmt.Fprintf(state.deps.Stdout, "onnx runtime: missing (%s)\n", runtimePath)
+			} else {
+				fmt.Fprintf(state.deps.Stdout, "onnx runtime: ok (%s)\n", runtimePath)
+			}
+			if len(missing) > 0 {
+				return engine.UsageError{Message: "missing local dependencies: " + strings.Join(missing, ", ")}
+			}
+			fmt.Fprintln(state.deps.Stdout, "ok")
+			return nil
+		},
+	}
+}
+
 func newSchemaCommand(state *rootState) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "schema",
@@ -354,6 +434,7 @@ func newSchemaCommand(state *rootState) *cobra.Command {
 					"transcription_url": map[string]string{"type": "string"},
 					"usage_seconds":     map[string]string{"type": "integer"},
 					"cleanup_error":     map[string]string{"type": "string"},
+					"warnings":          map[string]any{"type": "array", "items": map[string]string{"type": "string"}},
 				},
 			})
 		},
@@ -391,11 +472,38 @@ func applyTimingFlagOverrides(cmd *cobra.Command, cfg *config.Config, opts trans
 	if cmd.Flags().Changed("request-timeout") {
 		qwenCfg.ASR.RequestTimeout = opts.requestTimeout
 		cfg.Engines.FunASR.ASR.RequestTimeout = opts.requestTimeout
+		cfg.Engines.MiMoV25ASR.ASR.RequestTimeout = opts.requestTimeout
 	}
 	return nil
 }
 
 func validateEngineFlags(cmd *cobra.Command, cfg *config.Config, engineName string, opts transcribeOptions) error {
+	if engineName == config.EngineMimoV25ASR {
+		if strings.TrimSpace(opts.hotwords) != "" {
+			return engine.UsageError{Message: "mimo-v2.5-asr does not support --hotwords"}
+		}
+		if strings.TrimSpace(opts.hotwordsFile) != "" {
+			return engine.UsageError{Message: "mimo-v2.5-asr does not support --hotwords-file"}
+		}
+		if strings.TrimSpace(opts.vocabularyID) != "" {
+			return engine.UsageError{Message: "mimo-v2.5-asr does not support --vocabulary-id"}
+		}
+		if len(opts.channels) > 0 {
+			return engine.UsageError{Message: "mimo-v2.5-asr does not support --channel"}
+		}
+		if opts.noDiarization {
+			return engine.UsageError{Message: "mimo-v2.5-asr does not support --no-diarization"}
+		}
+		if opts.speakerCount != 0 {
+			return engine.UsageError{Message: "mimo-v2.5-asr does not support --speaker-count"}
+		}
+		for _, name := range []string{"enable-itn", "enable-words", "no-enable-words"} {
+			if cmd.Flags().Changed(name) {
+				return engine.UsageError{Message: fmt.Sprintf("mimo-v2.5-asr does not support --%s", name)}
+			}
+		}
+		return nil
+	}
 	if engineName != config.EngineFunASR {
 		return nil
 	}

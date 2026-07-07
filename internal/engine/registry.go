@@ -37,14 +37,15 @@ type Request struct {
 }
 
 type Result struct {
-	Engine           string `json:"engine"`
-	TaskID           string `json:"task_id,omitempty"`
-	OutputPath       string `json:"output_path,omitempty"`
-	RawJSONPath      string `json:"raw_json_path,omitempty"`
-	ObjectKey        string `json:"object_key,omitempty"`
-	TranscriptionURL string `json:"transcription_url,omitempty"`
-	UsageSeconds     int64  `json:"usage_seconds,omitempty"`
-	CleanupError     string `json:"cleanup_error,omitempty"`
+	Engine           string   `json:"engine"`
+	TaskID           string   `json:"task_id,omitempty"`
+	OutputPath       string   `json:"output_path,omitempty"`
+	RawJSONPath      string   `json:"raw_json_path,omitempty"`
+	ObjectKey        string   `json:"object_key,omitempty"`
+	TranscriptionURL string   `json:"transcription_url,omitempty"`
+	UsageSeconds     int64    `json:"usage_seconds,omitempty"`
+	CleanupError     string   `json:"cleanup_error,omitempty"`
+	Warnings         []string `json:"warnings,omitempty"`
 }
 
 type Runner interface {
@@ -58,10 +59,11 @@ func (f RunnerFunc) Transcribe(ctx context.Context, request Request) (Result, er
 }
 
 type Info struct {
-	Name        string `json:"name"`
-	Implemented bool   `json:"implemented"`
-	Default     bool   `json:"default"`
-	Description string `json:"description"`
+	Name                     string  `json:"name"`
+	Implemented              bool    `json:"implemented"`
+	Default                  bool    `json:"default"`
+	Description              string  `json:"description"`
+	ReferencePriceCNYPerHour float64 `json:"reference_price_cny_per_hour"`
 }
 
 type Registry struct {
@@ -70,27 +72,39 @@ type Registry struct {
 	runners     map[string]Runner
 }
 
-func DefaultRegistry(qwen Runner, fun ...Runner) *Registry {
+func DefaultRegistry(qwen Runner, runners ...Runner) *Registry {
 	if qwen == nil {
 		qwen = RunnerFunc(func(context.Context, Request) (Result, error) {
 			return Result{}, nil
 		})
 	}
 	funRunner := notImplementedRunner("fun-asr")
-	if len(fun) > 0 && fun[0] != nil {
-		funRunner = fun[0]
+	if len(runners) > 0 && runners[0] != nil {
+		funRunner = runners[0]
+	}
+	mimoRunner := notImplementedRunner("mimo-v2.5-asr")
+	if len(runners) > 1 && runners[1] != nil {
+		mimoRunner = runners[1]
 	}
 	infos := []Info{
 		{
-			Name:        "qwen3-asr-flash-filetrans",
-			Implemented: true,
-			Default:     true,
-			Description: "Aliyun DashScope Qwen3 async file transcription",
+			Name:                     "qwen3-asr-flash-filetrans",
+			Implemented:              true,
+			Default:                  true,
+			Description:              "Aliyun DashScope Qwen3 async file transcription (~¥0.79/hour)",
+			ReferencePriceCNYPerHour: 0.79,
 		},
 		{
-			Name:        "fun-asr",
-			Implemented: true,
-			Description: "Aliyun DashScope Fun-ASR async file transcription",
+			Name:                     "fun-asr",
+			Implemented:              true,
+			Description:              "Aliyun DashScope Fun-ASR async file transcription (~¥0.79/hour)",
+			ReferencePriceCNYPerHour: 0.79,
+		},
+		{
+			Name:                     "mimo-v2.5-asr",
+			Implemented:              true,
+			Description:              "Xiaomi MiMo V2.5 ASR with local VAD segmentation (~¥0.50/hour)",
+			ReferencePriceCNYPerHour: 0.50,
 		},
 	}
 	return &Registry{
@@ -99,6 +113,7 @@ func DefaultRegistry(qwen Runner, fun ...Runner) *Registry {
 		runners: map[string]Runner{
 			infos[0].Name: qwen,
 			infos[1].Name: funRunner,
+			infos[2].Name: mimoRunner,
 		},
 	}
 }

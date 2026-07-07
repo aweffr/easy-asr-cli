@@ -106,8 +106,11 @@ func TestEnginesJSONListsImplementedEngines(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &infos); err != nil {
 		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
 	}
-	if len(infos) != 2 || infos[0].Name != config.EngineQwen3Filetrans || infos[1].Name != config.EngineFunASR || !infos[1].Implemented {
+	if len(infos) != 3 || infos[0].Name != config.EngineQwen3Filetrans || infos[1].Name != config.EngineFunASR || infos[2].Name != config.EngineMimoV25ASR || !infos[2].Implemented {
 		t.Fatalf("infos = %#v", infos)
+	}
+	if infos[2].ReferencePriceCNYPerHour != 0.5 {
+		t.Fatalf("mimo reference price = %v", infos[2].ReferencePriceCNYPerHour)
 	}
 }
 
@@ -247,6 +250,87 @@ func TestTranscribeFunASRNoDiarizationClearsConfiguredSpeakerCount(t *testing.T)
 	}
 	if runner.request.SpeakerCount != 0 {
 		t.Fatalf("SpeakerCount = %d, want 0", runner.request.SpeakerCount)
+	}
+}
+
+func TestTranscribeMimoMapsLanguageAndRejectsUnsupportedFlags(t *testing.T) {
+	dir := t.TempDir()
+	audio := filepath.Join(dir, "voice.wav")
+	if err := os.WriteFile(audio, []byte("audio"), 0o600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	runner := &fakeRunner{}
+	cmd := cli.NewRootCommand(cli.Deps{
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		DefaultConfigPath: func() (string, error) { return filepath.Join(dir, "config.yaml"), nil },
+		LoadConfig: func(path string) (*config.Config, error) {
+			cfg := validConfig()
+			cfg.Engine = config.EngineMimoV25ASR
+			cfg.MiMoV25ASR().MiMo.APIKey = "mimo-key"
+			return cfg, nil
+		},
+		Registry: func(cfg *config.Config) *engine.Registry {
+			return engine.DefaultRegistry(&fakeRunner{}, &fakeRunner{}, runner)
+		},
+	})
+	cmd.SetArgs([]string{"transcribe", "--engine", "mimo-v2.5-asr", "--language", "en", audio})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if runner.request.Language != "en" {
+		t.Fatalf("Language = %q", runner.request.Language)
+	}
+
+	cmd = cli.NewRootCommand(cli.Deps{
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		DefaultConfigPath: func() (string, error) { return filepath.Join(dir, "config.yaml"), nil },
+		LoadConfig: func(path string) (*config.Config, error) {
+			cfg := validConfig()
+			cfg.Engine = config.EngineMimoV25ASR
+			cfg.MiMoV25ASR().MiMo.APIKey = "mimo-key"
+			return cfg, nil
+		},
+		Registry: func(cfg *config.Config) *engine.Registry {
+			return engine.DefaultRegistry(&fakeRunner{}, &fakeRunner{}, runner)
+		},
+	})
+	cmd.SetArgs([]string{"transcribe", "--engine", "mimo-v2.5-asr", "--hotwords", "test", audio})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute returned nil error")
+	}
+	if !engine.IsUsageError(err) {
+		t.Fatalf("error should be usage error, got %T: %v", err, err)
+	}
+}
+
+func TestDoctorReportsMissingLocalDependencies(t *testing.T) {
+	var stdout bytes.Buffer
+	cmd := cli.NewRootCommand(cli.Deps{
+		Stdout:            &stdout,
+		Stderr:            &bytes.Buffer{},
+		DefaultConfigPath: func() (string, error) { return "/tmp/config.yaml", nil },
+		LoadConfig: func(path string) (*config.Config, error) {
+			cfg := validConfig()
+			cfg.Engine = config.EngineMimoV25ASR
+			cfg.MiMoV25ASR().MiMo.APIKey = "mimo-key"
+			cfg.MiMoV25ASR().Segmentation.ModelPath = filepath.Join(t.TempDir(), "missing.onnx")
+			cfg.MiMoV25ASR().Segmentation.ONNXRuntimeLibraryPath = filepath.Join(t.TempDir(), "missing.dylib")
+			return cfg, nil
+		},
+		Registry: func(cfg *config.Config) *engine.Registry { return engine.DefaultRegistry(&fakeRunner{}) },
+	})
+	cmd.SetArgs([]string{"doctor"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute returned nil error")
+	}
+	if !strings.Contains(stdout.String(), "silero vad model") || !strings.Contains(stdout.String(), "onnx runtime") {
+		t.Fatalf("doctor output = %q", stdout.String())
 	}
 }
 

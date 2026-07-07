@@ -12,8 +12,8 @@ func TestRegistryExposesImplementedEngines(t *testing.T) {
 	registry := engine.DefaultRegistry(nil)
 
 	infos := registry.List()
-	if len(infos) != 2 {
-		t.Fatalf("List returned %d engines, want 2", len(infos))
+	if len(infos) != 3 {
+		t.Fatalf("List returned %d engines, want 3", len(infos))
 	}
 	if registry.DefaultName() != "qwen3-asr-flash-filetrans" {
 		t.Fatalf("DefaultName = %q", registry.DefaultName())
@@ -21,6 +21,9 @@ func TestRegistryExposesImplementedEngines(t *testing.T) {
 	for _, info := range infos {
 		if !info.Implemented {
 			t.Fatalf("engine should be implemented: %#v", info)
+		}
+		if info.ReferencePriceCNYPerHour <= 0 {
+			t.Fatalf("engine should expose reference price: %#v", info)
 		}
 	}
 }

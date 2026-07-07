@@ -27,3 +27,11 @@ _Avoid_: export, formatting
 **Diarization**:
 Speaker separation that assigns a speaker identifier to recognized speech segments.
 _Avoid_: speaker detection, voice labeling
+
+**Local VAD Segmentation**:
+The MiMo preprocessing step that uses Silero VAD v6 through ONNX Runtime to split a long recorded file into short WAV segments before ASR submission.
+_Avoid_: remote segmentation, chunking without speech boundaries
+
+**Segment Raw JSON Wrapper**:
+The MiMo raw output document that stores total audio metadata, segment time ranges, each MiMo response, and accumulated usage.
+_Avoid_: pretending the wrapper is a vendor response

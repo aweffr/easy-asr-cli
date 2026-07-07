@@ -141,6 +141,66 @@ engines:
 	}
 }
 
+func TestMimoConfigDefaultsEnvAndValidation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := []byte(`
+engine: mimo-v2.5-asr
+engines:
+  mimo_v2_5_asr:
+    asr:
+      language: zh
+`)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("MIMO_API_KEY", "env-mimo-key")
+	t.Setenv("EASY_ASR_SILERO_VAD_MODEL", "/tmp/silero.onnx")
+	t.Setenv("EASY_ASR_ONNXRUNTIME_LIBRARY", "/tmp/libonnxruntime.dylib")
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	mimo := cfg.MiMoV25ASR()
+	if cfg.Engine != config.EngineMimoV25ASR {
+		t.Fatalf("Engine = %q", cfg.Engine)
+	}
+	if mimo.MiMo.APIKey != "env-mimo-key" {
+		t.Fatalf("MiMo API key = %q", mimo.MiMo.APIKey)
+	}
+	if mimo.MiMo.BaseURL != "https://api.xiaomimimo.com/v1" || mimo.MiMo.Model != config.EngineMimoV25ASR {
+		t.Fatalf("MiMo config = %#v", mimo.MiMo)
+	}
+	if mimo.ASR.Language != "zh" || mimo.ASR.RequestTimeout != 5*time.Minute {
+		t.Fatalf("ASR config = %#v", mimo.ASR)
+	}
+	if mimo.Segmentation.TargetDuration != 3*time.Minute || mimo.Segmentation.MinDuration != 150*time.Second || mimo.Segmentation.MaxDuration != 210*time.Second {
+		t.Fatalf("segmentation = %#v", mimo.Segmentation)
+	}
+	if mimo.Segmentation.ModelPath != "/tmp/silero.onnx" || mimo.Segmentation.ONNXRuntimeLibraryPath != "/tmp/libonnxruntime.dylib" {
+		t.Fatalf("segmentation env = %#v", mimo.Segmentation)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+}
+
+func TestValidateRejectsInvalidMimoLanguage(t *testing.T) {
+	cfg := config.Default()
+	cfg.Engine = config.EngineMimoV25ASR
+	cfg.MiMoV25ASR().MiMo.APIKey = "mimo-key"
+	cfg.MiMoV25ASR().ASR.Language = "ja"
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate returned nil error")
+	}
+	if !config.IsUsageError(err) {
+		t.Fatalf("error should be usage error, got %T: %v", err, err)
+	}
+}
+
 func TestValidateAcceptsFunASRWithInheritedCredentials(t *testing.T) {
 	cfg := config.Default()
 	cfg.Engine = config.EngineFunASR
@@ -202,6 +262,11 @@ func TestRedactedConfigHidesSecrets(t *testing.T) {
 	}
 	if qwenRedacted.OSS.AccessKeyID == "" {
 		t.Fatal("access key id should be partially visible after redaction")
+	}
+	cfg.MiMoV25ASR().MiMo.APIKey = "mimo-secret"
+	redacted = cfg.Redacted()
+	if redacted.MiMoV25ASR().MiMo.APIKey == "mimo-secret" {
+		t.Fatal("MiMo API key was not redacted")
 	}
 }
 

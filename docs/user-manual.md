@@ -7,7 +7,7 @@
 - 人：命令短、默认行为清楚、错误信息可读。
 - Agent / 脚本：stdout 稳定、支持 `--json`、错误走 stderr、exit code 可判断。
 
-当前实现链路：
+DashScope engine 链路：
 
 1. 读取本地音频文件。
 2. 上传到配置中的对象存储。
@@ -17,6 +17,16 @@
 6. 下载转写 JSON。
 7. 渲染 SRT。
 8. 默认清理临时对象。
+
+MiMo engine 链路：
+
+1. 读取本地音频文件。
+2. 用 `ffprobe` 获取总时长。
+3. 用 `ffmpeg` 归一化为 16 kHz mono WAV。
+4. 用 Silero VAD v6 + ONNX Runtime 寻找分段断点。
+5. 切成约 180 秒的 WAV segment。
+6. 把每段作为 `data:audio/wav;base64,...` 调用 MiMo API。
+7. 合并 raw JSON wrapper 并渲染按原始时间轴排列的 SRT。
 
 ## 2. 命令总览
 
@@ -31,6 +41,8 @@ easy_asr --help
 - `config validate`：验证配置是否完整。
 - `config init`：创建默认配置模板，不会覆盖已有配置。
 - `engines`：列出已注册 engine。
+- `assets install`：下载 Silero VAD v6 ONNX 模型到用户缓存目录。
+- `doctor`：检查 ffmpeg、ffprobe、Silero 模型和 ONNX Runtime。
 - `schema run-result`：输出 `--json` 结果结构说明。
 
 ## 3. 转写音频
@@ -122,6 +134,8 @@ easy_asr transcribe input.mp3 --stdout > input.srt
 --config string              指定配置文件路径
 ```
 
+MiMo 不支持 DashScope/Fun-ASR 专属参数；显式传入 `--hotwords`、`--hotwords-file`、`--vocabulary-id`、`--channel`、`--no-diarization`、`--speaker-count`、`--enable-itn`、`--enable-words` 或 `--no-enable-words` 会返回 usage error。
+
 ## 5. 配置
 
 默认配置路径：
@@ -182,6 +196,21 @@ engines:
       model: "fun-asr"
     asr:
       diarization_enabled: true
+  mimo_v2_5_asr:
+    mimo:
+      api_key: "<mimo-api-key>"
+      base_url: "https://api.xiaomimimo.com/v1"
+      model: "mimo-v2.5-asr"
+    asr:
+      language: "auto"
+      request_timeout: "5m0s"
+    segmentation:
+      target_duration: "3m0s"
+      min_duration: "2m30s"
+      max_duration: "3m30s"
+      vad_threshold: 0.5
+      min_silence: "100ms"
+      speech_pad: "30ms"
 ```
 
 `fun_asr` 默认继承 `qwen3_asr_flash_filetrans` 下的 DashScope API key、`base_url`、对象存储配置和轮询配置。只需要在 `fun_asr` 中写差异项，例如改模型、热词表 ID 或关闭说话人分离。
@@ -209,6 +238,12 @@ AWS_ACCESS_KEY_ID
 EASY_ASR_OSS_ACCESS_KEY_SECRET
 AWS_SECRET_ACCESS_KEY
 EASY_ASR_OSS_KEY_PREFIX
+EASY_ASR_MIMO_API_KEY
+MIMO_API_KEY
+EASY_ASR_MIMO_BASE_URL
+EASY_ASR_MIMO_MODEL
+EASY_ASR_SILERO_VAD_MODEL
+EASY_ASR_ONNXRUNTIME_LIBRARY
 ```
 
 ## 6. Engine 设计
