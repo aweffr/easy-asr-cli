@@ -273,7 +273,7 @@ func (e *Engine) transcribeSegments(ctx context.Context, segments []audio.Prepar
 func (e *Engine) transcribeDataURLWithRetry(ctx context.Context, dataURL string, language string) (TranscriptionResponse, error) {
 	backoffs := e.retryBackoffs
 	if backoffs == nil {
-		backoffs = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
+		backoffs = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second}
 	}
 	var lastErr error
 	for attempt := 0; ; attempt++ {

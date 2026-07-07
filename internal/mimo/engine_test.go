@@ -193,14 +193,14 @@ func TestEngineRetriesMimoHTTP429WithBackoff(t *testing.T) {
 	if err := os.WriteFile(segmentPath, []byte("part"), 0o600); err != nil {
 		t.Fatalf("write segment: %v", err)
 	}
-	client := &retryMimoClient{failures: 2}
+	client := &retryMimoClient{failures: 3}
 	runner := mimo.NewEngine(mimo.EngineOptions{
 		Config:            validMimoConfig(),
 		Processor:         &fakeProcessor{segments: []audio.PreparedSegment{{Index: 1, Total: 1, Start: 0, End: time.Second, Path: segmentPath}}},
 		Client:            client,
 		MaxConcurrency:    1,
 		RequestStartDelay: -1,
-		RetryBackoffs:     []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond},
+		RetryBackoffs:     []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond, time.Millisecond},
 	})
 
 	result, err := runner.Transcribe(context.Background(), engine.Request{
@@ -210,8 +210,8 @@ func TestEngineRetriesMimoHTTP429WithBackoff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Transcribe returned error: %v", err)
 	}
-	if client.calls != 3 {
-		t.Fatalf("calls = %d, want 3", client.calls)
+	if client.calls != 4 {
+		t.Fatalf("calls = %d, want 4", client.calls)
 	}
 	if result.UsageSeconds != 1 {
 		t.Fatalf("UsageSeconds = %d", result.UsageSeconds)
