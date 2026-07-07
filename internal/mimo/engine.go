@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aweffr/easy-asr-cli/internal/assets"
@@ -28,15 +29,19 @@ type ASRClient interface {
 }
 
 type EngineOptions struct {
-	Config    *config.MiMoConfig
-	Processor SegmentProcessor
-	Client    ASRClient
+	Config            *config.MiMoConfig
+	Processor         SegmentProcessor
+	Client            ASRClient
+	MaxConcurrency    int
+	RequestStartDelay time.Duration
 }
 
 type Engine struct {
-	cfg       *config.MiMoConfig
-	processor SegmentProcessor
-	client    ASRClient
+	cfg               *config.MiMoConfig
+	processor         SegmentProcessor
+	client            ASRClient
+	maxConcurrency    int
+	requestStartDelay time.Duration
 }
 
 type rawWrapper struct {
@@ -59,7 +64,13 @@ type rawSegment struct {
 }
 
 func NewEngine(options EngineOptions) *Engine {
-	return &Engine{cfg: options.Config, processor: options.Processor, client: options.Client}
+	return &Engine{
+		cfg:               options.Config,
+		processor:         options.Processor,
+		client:            options.Client,
+		maxConcurrency:    options.MaxConcurrency,
+		requestStartDelay: options.RequestStartDelay,
+	}
 }
 
 func (e *Engine) Transcribe(ctx context.Context, request engine.Request) (result engine.Result, err error) {
@@ -121,14 +132,15 @@ func (e *Engine) Transcribe(ctx context.Context, request engine.Request) (result
 	language := firstNonEmpty(request.Language, e.cfg.ASR.Language, "auto")
 	wrapper := rawWrapper{Engine: config.EngineMimoV25ASR, AudioPath: request.AudioPath}
 	transcription := srt.Transcription{Transcripts: []srt.Transcript{{ChannelID: 0}}}
-	for _, segment := range segments {
-		dataURL, err := wavDataURL(segment.Path)
-		if err != nil {
-			return result, err
-		}
-		response, err := e.client.TranscribeDataURL(ctx, dataURL, language)
-		if err != nil {
-			return result, err
+	responses, err := e.transcribeSegments(ctx, segments, language)
+	if err != nil {
+		return result, err
+	}
+	for _, segmentResponse := range responses {
+		segment := segmentResponse.segment
+		response := segmentResponse.response
+		if segmentResponse.err != nil {
+			return result, segmentResponse.err
 		}
 		result.UsageSeconds += response.UsageSeconds
 		wrapper.UsageSeconds += response.UsageSeconds
@@ -177,6 +189,114 @@ func (e *Engine) Transcribe(ctx context.Context, request engine.Request) (result
 		return result, err
 	}
 	return result, nil
+}
+
+type segmentResponse struct {
+	segment  audio.PreparedSegment
+	response TranscriptionResponse
+	err      error
+}
+
+func (e *Engine) transcribeSegments(ctx context.Context, segments []audio.PreparedSegment, language string) ([]segmentResponse, error) {
+	maxConcurrency := e.maxConcurrency
+	if maxConcurrency <= 0 {
+		maxConcurrency = 5
+	}
+	startDelay := e.requestStartDelay
+	if startDelay < 0 {
+		startDelay = 0
+	}
+	if e.requestStartDelay == 0 {
+		startDelay = time.Second
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	responses := make([]segmentResponse, len(segments))
+	sem := make(chan struct{}, maxConcurrency)
+	limiter := newRequestStartLimiter(startDelay)
+	var wg sync.WaitGroup
+	errCh := make(chan error, 1)
+	for i, segment := range segments {
+		wg.Add(1)
+		go func(i int, segment audio.PreparedSegment) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				responses[i] = segmentResponse{segment: segment, err: ctx.Err()}
+				return
+			}
+			defer func() { <-sem }()
+			dataURL, err := wavDataURL(segment.Path)
+			if err != nil {
+				responses[i] = segmentResponse{segment: segment, err: err}
+				sendFirstError(errCh, cancel, err)
+				return
+			}
+			if err := limiter.Wait(ctx); err != nil {
+				responses[i] = segmentResponse{segment: segment, err: err}
+				return
+			}
+			response, err := e.client.TranscribeDataURL(ctx, dataURL, language)
+			if err != nil {
+				responses[i] = segmentResponse{segment: segment, err: err}
+				sendFirstError(errCh, cancel, err)
+				return
+			}
+			responses[i] = segmentResponse{segment: segment, response: response}
+		}(i, segment)
+	}
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		return responses, err
+	default:
+		return responses, nil
+	}
+}
+
+func sendFirstError(errCh chan<- error, cancel context.CancelFunc, err error) {
+	select {
+	case errCh <- err:
+		cancel()
+	default:
+	}
+}
+
+type requestStartLimiter struct {
+	mu    sync.Mutex
+	delay time.Duration
+	next  time.Time
+}
+
+func newRequestStartLimiter(delay time.Duration) *requestStartLimiter {
+	return &requestStartLimiter{delay: delay}
+}
+
+func (l *requestStartLimiter) Wait(ctx context.Context) error {
+	if l.delay <= 0 {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	if !l.next.IsZero() && now.Before(l.next) {
+		timer := time.NewTimer(time.Until(l.next))
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return ctx.Err()
+		}
+	}
+	l.next = time.Now().Add(l.delay)
+	return nil
 }
 
 func wavDataURL(path string) (string, error) {

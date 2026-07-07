@@ -2,10 +2,13 @@ package mimo_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -96,6 +99,87 @@ func TestEngineTranscribesSegmentsWritesRawWrapperAndSRTLabels(t *testing.T) {
 	}
 }
 
+func TestEngineRunsMimoRequestsWithBoundedParallelismAndOrderedOutput(t *testing.T) {
+	dir := t.TempDir()
+	audioPath := filepath.Join(dir, "input.mp3")
+	if err := os.WriteFile(audioPath, []byte("audio"), 0o600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	var segments []audio.PreparedSegment
+	for i := 1; i <= 6; i++ {
+		path := filepath.Join(dir, "part-"+time.Duration(i).String()+".wav")
+		if err := os.WriteFile(path, []byte{byte(i)}, 0o600); err != nil {
+			t.Fatalf("write segment: %v", err)
+		}
+		segments = append(segments, audio.PreparedSegment{
+			Index: i,
+			Total: 6,
+			Start: time.Duration(i-1) * time.Second,
+			End:   time.Duration(i) * time.Second,
+			Path:  path,
+		})
+	}
+	client := &parallelMimoClient{
+		sleep:     30 * time.Millisecond,
+		responses: make(map[string]mimo.TranscriptionResponse),
+	}
+	for i := 1; i <= 6; i++ {
+		client.responses[string([]byte{byte(i)})] = mimo.TranscriptionResponse{
+			ID:           string(rune('a' + i)),
+			Content:      "part " + string(rune('0'+i)),
+			FinishReason: "stop",
+			UsageSeconds: int64(i),
+			Raw:          map[string]any{"index": i},
+		}
+	}
+	runner := mimo.NewEngine(mimo.EngineOptions{
+		Config:            validMimoConfig(),
+		Processor:         &fakeProcessor{segments: segments},
+		Client:            client,
+		MaxConcurrency:    2,
+		RequestStartDelay: 5 * time.Millisecond,
+	})
+	outPath := filepath.Join(dir, "out.srt")
+	rawPath := filepath.Join(dir, "raw.json")
+
+	result, err := runner.Transcribe(context.Background(), engine.Request{
+		AudioPath:   audioPath,
+		OutputPath:  outPath,
+		RawJSONPath: rawPath,
+	})
+	if err != nil {
+		t.Fatalf("Transcribe returned error: %v", err)
+	}
+	if client.maxActive > 2 {
+		t.Fatalf("max active requests = %d, want <= 2", client.maxActive)
+	}
+	if len(client.starts) != 6 {
+		t.Fatalf("starts = %d, want 6", len(client.starts))
+	}
+	sortedStarts := append([]time.Time(nil), client.starts...)
+	sort.Slice(sortedStarts, func(i, j int) bool { return sortedStarts[i].Before(sortedStarts[j]) })
+	for i := 1; i < len(sortedStarts); i++ {
+		if sortedStarts[i].Sub(sortedStarts[i-1]) < 4*time.Millisecond {
+			t.Fatalf("request starts were not rate-limited: %v then %v", sortedStarts[i-1], sortedStarts[i])
+		}
+	}
+	if result.UsageSeconds != 21 {
+		t.Fatalf("UsageSeconds = %d, want 21", result.UsageSeconds)
+	}
+	body := string(mustRead(t, outPath))
+	if strings.Index(body, "part 1") > strings.Index(body, "part 6") {
+		t.Fatalf("SRT output is not ordered by segment:\n%s", body)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(mustRead(t, rawPath), &raw); err != nil {
+		t.Fatalf("raw json invalid: %v", err)
+	}
+	rawSegments := raw["segments"].([]any)
+	if int(rawSegments[0].(map[string]any)["index"].(float64)) != 1 || int(rawSegments[5].(map[string]any)["index"].(float64)) != 6 {
+		t.Fatalf("raw segments not ordered: %#v", rawSegments)
+	}
+}
+
 type fakeProcessor struct {
 	segments []audio.PreparedSegment
 	cleaned  bool
@@ -124,6 +208,38 @@ func (f *fakeMimoClient) TranscribeDataURL(ctx context.Context, dataURL string, 
 	return response, nil
 }
 
+type parallelMimoClient struct {
+	mu        sync.Mutex
+	sleep     time.Duration
+	active    int
+	maxActive int
+	starts    []time.Time
+	responses map[string]mimo.TranscriptionResponse
+}
+
+func (p *parallelMimoClient) TranscribeDataURL(ctx context.Context, dataURL string, language string) (mimo.TranscriptionResponse, error) {
+	payload := strings.TrimPrefix(dataURL, "data:audio/wav;base64,")
+	p.mu.Lock()
+	p.active++
+	if p.active > p.maxActive {
+		p.maxActive = p.active
+	}
+	p.starts = append(p.starts, time.Now())
+	p.mu.Unlock()
+
+	select {
+	case <-time.After(p.sleep):
+	case <-ctx.Done():
+		return mimo.TranscriptionResponse{}, ctx.Err()
+	}
+
+	p.mu.Lock()
+	p.active--
+	response := p.responses[mustBase64Decode(payload)]
+	p.mu.Unlock()
+	return response, nil
+}
+
 func validMimoConfig() *config.MiMoConfig {
 	cfg := config.Default().MiMoV25ASR()
 	cfg.MiMo.APIKey = "mimo-key"
@@ -137,4 +253,12 @@ func mustRead(t *testing.T, path string) []byte {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return body
+}
+
+func mustBase64Decode(value string) string {
+	body, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		panic(err)
+	}
+	return string(body)
 }
