@@ -16,6 +16,7 @@ import (
 	"github.com/aweffr/easy-asr-cli/internal/audio"
 	"github.com/aweffr/easy-asr-cli/internal/config"
 	"github.com/aweffr/easy-asr-cli/internal/engine"
+	"github.com/aweffr/easy-asr-cli/internal/observe"
 	"github.com/aweffr/easy-asr-cli/internal/srt"
 	"github.com/aweffr/easy-asr-cli/internal/vad"
 )
@@ -80,6 +81,8 @@ func NewEngine(options EngineOptions) *Engine {
 }
 
 func (e *Engine) Transcribe(ctx context.Context, request engine.Request) (result engine.Result, err error) {
+	observer := request.Observer
+	runStart := time.Now()
 	if e.cfg == nil {
 		return engine.Result{}, fmt.Errorf("mimo config is required")
 	}
@@ -108,7 +111,8 @@ func (e *Engine) Transcribe(ctx context.Context, request engine.Request) (result
 				MinDuration:    e.cfg.Segmentation.MinDuration,
 				MaxDuration:    e.cfg.Segmentation.MaxDuration,
 			},
-			TempDir: e.cfg.Segmentation.TempDir,
+			TempDir:  e.cfg.Segmentation.TempDir,
+			Observer: observer,
 		}
 	}
 	if e.client == nil {
@@ -125,20 +129,61 @@ func (e *Engine) Transcribe(ctx context.Context, request engine.Request) (result
 		OutputPath:  request.OutputPath,
 		RawJSONPath: request.RawJSONPath,
 	}
+	emit(observer, observe.Event{Event: "asr.run.started", Engine: config.EngineMimoV25ASR, Step: "run", Message: "transcription started"})
+	defer func() {
+		event := observe.Event{
+			Event:     "asr.run.completed",
+			Engine:    config.EngineMimoV25ASR,
+			Step:      "run",
+			ElapsedMS: elapsedMS(runStart),
+			Message:   "transcription completed",
+		}
+		if err != nil {
+			event.Event = "asr.run.failed"
+			event.Level = "error"
+			event.Error = err.Error()
+			event.ErrorType = fmt.Sprintf("%T", err)
+			event.Message = "transcription failed"
+		}
+		emit(observer, event)
+	}()
+	preprocessStart := time.Now()
+	emit(observer, observe.Event{Event: "audio.preprocess.started", Engine: config.EngineMimoV25ASR, Step: "preprocess", Message: "preparing audio segments"})
 	segments, err := e.processor.Prepare(ctx, request.AudioPath)
 	if err != nil {
 		return result, err
 	}
+	emit(observer, observe.Event{
+		Event:        "audio.preprocess.completed",
+		Engine:       config.EngineMimoV25ASR,
+		Step:         "preprocess",
+		ElapsedMS:    elapsedMS(preprocessStart),
+		SegmentTotal: len(segments),
+		Message:      "audio segments prepared",
+	})
 	defer func() {
+		cleanupStart := time.Now()
+		emit(observer, observe.Event{Event: "cleanup.started", Engine: config.EngineMimoV25ASR, Step: "cleanup", Message: "cleaning temporary audio segments"})
 		if err := e.processor.Cleanup(); err != nil {
 			result.CleanupError = err.Error()
+			emit(observer, observe.Event{
+				Event:     "cleanup.failed",
+				Level:     "error",
+				Engine:    config.EngineMimoV25ASR,
+				Step:      "cleanup",
+				ElapsedMS: elapsedMS(cleanupStart),
+				Error:     err.Error(),
+				ErrorType: fmt.Sprintf("%T", err),
+			})
+			return
 		}
+		emit(observer, observe.Event{Event: "cleanup.completed", Engine: config.EngineMimoV25ASR, Step: "cleanup", ElapsedMS: elapsedMS(cleanupStart), Message: "temporary audio segments cleaned"})
 	}()
 
 	language := firstNonEmpty(request.Language, e.cfg.ASR.Language, "auto")
 	wrapper := rawWrapper{Engine: config.EngineMimoV25ASR, AudioPath: request.AudioPath}
 	transcription := srt.Transcription{Transcripts: []srt.Transcript{{ChannelID: 0}}}
-	responses, err := e.transcribeSegments(ctx, segments, language)
+	responses, err := e.transcribeSegments(ctx, segments, language, observer)
 	if err != nil {
 		return result, err
 	}
@@ -184,6 +229,8 @@ func (e *Engine) Transcribe(ctx context.Context, request engine.Request) (result
 			return result, err
 		}
 	}
+	renderStart := time.Now()
+	emit(observer, observe.Event{Event: "srt.render.started", Engine: config.EngineMimoV25ASR, Step: "render", Message: "rendering SRT"})
 	rendered, err := srt.Render(transcription, srt.Options{MaxCueDuration: int64(4 * time.Hour / time.Millisecond)})
 	if err != nil {
 		return result, err
@@ -194,6 +241,7 @@ func (e *Engine) Transcribe(ctx context.Context, request engine.Request) (result
 	if err := os.WriteFile(request.OutputPath, []byte(rendered), 0o644); err != nil {
 		return result, err
 	}
+	emit(observer, observe.Event{Event: "srt.render.completed", Engine: config.EngineMimoV25ASR, Step: "render", ElapsedMS: elapsedMS(renderStart), Message: "SRT output written"})
 	return result, nil
 }
 
@@ -203,7 +251,7 @@ type segmentResponse struct {
 	err      error
 }
 
-func (e *Engine) transcribeSegments(ctx context.Context, segments []audio.PreparedSegment, language string) ([]segmentResponse, error) {
+func (e *Engine) transcribeSegments(ctx context.Context, segments []audio.PreparedSegment, language string, observer observe.Observer) ([]segmentResponse, error) {
 	maxConcurrency := e.maxConcurrency
 	if maxConcurrency <= 0 {
 		maxConcurrency = 5
@@ -252,13 +300,34 @@ func (e *Engine) transcribeSegments(ctx context.Context, segments []audio.Prepar
 		go func(i int, segment audio.PreparedSegment, dataURL string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			response, err := e.transcribeDataURLWithRetry(ctx, dataURL, language)
+			segmentStart := time.Now()
+			emit(observer, segmentEvent("mimo.segment.started", segment, observe.Event{
+				Engine:  config.EngineMimoV25ASR,
+				Step:    "mimo_request",
+				Message: "MiMo segment request started",
+			}))
+			response, err := e.transcribeDataURLWithRetry(ctx, dataURL, language, segment, observer)
 			if err != nil {
 				responses[i] = segmentResponse{segment: segment, err: err}
+				emit(observer, segmentEvent("mimo.segment.failed", segment, observe.Event{
+					Level:     "error",
+					Engine:    config.EngineMimoV25ASR,
+					Step:      "mimo_request",
+					ElapsedMS: elapsedMS(segmentStart),
+					Error:     err.Error(),
+					ErrorType: fmt.Sprintf("%T", err),
+				}))
 				sendFirstError(errCh, cancel, err)
 				return
 			}
 			responses[i] = segmentResponse{segment: segment, response: response}
+			emit(observer, segmentEvent("mimo.segment.completed", segment, observe.Event{
+				Engine:       config.EngineMimoV25ASR,
+				Step:         "mimo_request",
+				ElapsedMS:    elapsedMS(segmentStart),
+				UsageSeconds: response.UsageSeconds,
+				Message:      "MiMo segment request completed",
+			}))
 		}(i, segment, dataURL)
 	}
 	wg.Wait()
@@ -270,7 +339,7 @@ func (e *Engine) transcribeSegments(ctx context.Context, segments []audio.Prepar
 	}
 }
 
-func (e *Engine) transcribeDataURLWithRetry(ctx context.Context, dataURL string, language string) (TranscriptionResponse, error) {
+func (e *Engine) transcribeDataURLWithRetry(ctx context.Context, dataURL string, language string, segment audio.PreparedSegment, observer observe.Observer) (TranscriptionResponse, error) {
 	backoffs := e.retryBackoffs
 	if backoffs == nil {
 		backoffs = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second}
@@ -285,10 +354,39 @@ func (e *Engine) transcribeDataURLWithRetry(ctx context.Context, dataURL string,
 		if !isRetryable429(err) || attempt >= len(backoffs) {
 			return TranscriptionResponse{}, lastErr
 		}
+		emit(observer, segmentEvent("mimo.segment.retry", segment, observe.Event{
+			Level:          "warn",
+			Engine:         config.EngineMimoV25ASR,
+			Step:           "mimo_request",
+			Attempt:        attempt + 1,
+			BackoffSeconds: backoffs[attempt].Seconds(),
+			Error:          err.Error(),
+			ErrorType:      fmt.Sprintf("%T", err),
+			Message:        "MiMo returned HTTP 429; retrying after backoff",
+		}))
 		if err := sleepContext(ctx, backoffs[attempt]); err != nil {
 			return TranscriptionResponse{}, err
 		}
 	}
+}
+
+func emit(observer observe.Observer, event observe.Event) {
+	if observer != nil {
+		observer.Emit(event)
+	}
+}
+
+func segmentEvent(name string, segment audio.PreparedSegment, event observe.Event) observe.Event {
+	event.Event = name
+	event.SegmentIndex = segment.Index
+	event.SegmentTotal = segment.Total
+	event.StartSeconds = segment.Start.Seconds()
+	event.EndSeconds = segment.End.Seconds()
+	return event
+}
+
+func elapsedMS(start time.Time) int64 {
+	return time.Since(start).Milliseconds()
 }
 
 func isRetryable429(err error) bool {

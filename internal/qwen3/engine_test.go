@@ -13,6 +13,7 @@ import (
 	"github.com/aweffr/easy-asr-cli/internal/config"
 	"github.com/aweffr/easy-asr-cli/internal/dashscope"
 	"github.com/aweffr/easy-asr-cli/internal/engine"
+	"github.com/aweffr/easy-asr-cli/internal/observe"
 	"github.com/aweffr/easy-asr-cli/internal/qwen3"
 	"github.com/aweffr/easy-asr-cli/internal/srt"
 	"github.com/aweffr/easy-asr-cli/internal/storage"
@@ -155,6 +156,56 @@ func TestEngineReportsCleanupFailureInResult(t *testing.T) {
 	}
 }
 
+func TestEngineEmitsProgressEvents(t *testing.T) {
+	dir := t.TempDir()
+	audio := filepath.Join(dir, "sample.mp3")
+	if err := os.WriteFile(audio, []byte("audio"), 0o600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	recorder := &recordingObserver{}
+	runner := qwen3.NewEngine(qwen3.Options{
+		Config:  config.Default().Qwen3(),
+		Storage: &fakeStorage{stored: storage.StoredObject{Bucket: "bucket", Key: "tmp/sample.mp3"}, url: "https://signed.example/sample.mp3"},
+		ASR: &fakeASR{
+			taskID: "task-123",
+			result: dashscope.TaskResult{TaskID: "task-123", TranscriptionURL: "https://result.example/transcription.json", UsageSeconds: 9},
+			transcription: srt.Transcription{Transcripts: []srt.Transcript{{
+				Sentences: []srt.Sentence{{BeginTime: 0, EndTime: 1000, Text: "你好"}},
+			}}},
+		},
+	})
+
+	_, err := runner.Transcribe(context.Background(), engine.Request{
+		AudioPath:  audio,
+		OutputPath: filepath.Join(dir, "sample.srt"),
+		Observer:   recorder,
+	})
+	if err != nil {
+		t.Fatalf("Transcribe returned error: %v", err)
+	}
+	names := eventNames(recorder.events)
+	for _, want := range []string{
+		"asr.run.started",
+		"storage.upload.started",
+		"storage.upload.completed",
+		"storage.presign.completed",
+		"dashscope.submit.completed",
+		"dashscope.poll.completed",
+		"transcription.download.completed",
+		"srt.render.completed",
+		"cleanup.completed",
+		"asr.run.completed",
+	} {
+		if !contains(names, want) {
+			t.Fatalf("events missing %q: %#v", want, names)
+		}
+	}
+	poll := findEvent(recorder.events, "dashscope.poll.completed")
+	if poll.UsageSeconds != 9 {
+		t.Fatalf("poll event = %#v", poll)
+	}
+}
+
 type fakeStorage struct {
 	stored      storage.StoredObject
 	url         string
@@ -193,4 +244,38 @@ func (f *fakeASR) WaitTask(ctx context.Context, taskID string, timeout time.Dura
 
 func (f *fakeASR) DownloadTranscription(ctx context.Context, url string) (srt.Transcription, error) {
 	return f.transcription, nil
+}
+
+type recordingObserver struct {
+	events []observe.Event
+}
+
+func (r *recordingObserver) Emit(event observe.Event) {
+	r.events = append(r.events, event)
+}
+
+func eventNames(events []observe.Event) []string {
+	out := make([]string, 0, len(events))
+	for _, event := range events {
+		out = append(out, event.Event)
+	}
+	return out
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func findEvent(events []observe.Event, name string) observe.Event {
+	for _, event := range events {
+		if event.Event == name {
+			return event
+		}
+	}
+	return observe.Event{}
 }

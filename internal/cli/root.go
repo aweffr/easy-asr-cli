@@ -17,6 +17,7 @@ import (
 	"github.com/aweffr/easy-asr-cli/internal/engine"
 	"github.com/aweffr/easy-asr-cli/internal/funasr"
 	"github.com/aweffr/easy-asr-cli/internal/mimo"
+	"github.com/aweffr/easy-asr-cli/internal/observe"
 	"github.com/aweffr/easy-asr-cli/internal/qwen3"
 )
 
@@ -120,6 +121,9 @@ func newTranscribeCommand(state *rootState) *cobra.Command {
 			if err := validateEngineFlags(cmd, cfg, engineName, opts); err != nil {
 				return err
 			}
+			if opts.progress && opts.progressJSONL {
+				return engine.UsageError{Message: "--progress and --progress-jsonl are mutually exclusive"}
+			}
 			if err := cfg.Validate(); err != nil {
 				return err
 			}
@@ -161,6 +165,11 @@ func newTranscribeCommand(state *rootState) *cobra.Command {
 				Channels:     opts.channels,
 				VocabularyID: opts.vocabularyID,
 				SpeakerCount: opts.speakerCount,
+			}
+			if opts.progressJSONL {
+				request.Observer = observe.New(state.deps.Stderr, observe.FormatJSONL)
+			} else if opts.progress {
+				request.Observer = observe.New(state.deps.Stderr, observe.FormatHuman)
 			}
 			qwenCfg := cfg.Qwen3()
 			request.EnableITN = qwenCfg.ASR.EnableITN
@@ -217,6 +226,8 @@ func newTranscribeCommand(state *rootState) *cobra.Command {
 	cmd.Flags().StringVarP(&opts.outputPath, "output", "o", "", "output SRT path")
 	cmd.Flags().BoolVar(&opts.stdout, "stdout", false, "write SRT content to stdout")
 	cmd.Flags().BoolVar(&opts.jsonOutput, "json", false, "write JSON run result to stdout")
+	cmd.Flags().BoolVar(&opts.progress, "progress", false, "write human-readable progress events to stderr")
+	cmd.Flags().BoolVar(&opts.progressJSONL, "progress-jsonl", false, "write machine-readable progress events as JSON Lines to stderr")
 	cmd.Flags().StringVar(&opts.rawJSONPath, "raw-json", "", "save raw transcription JSON to path")
 	cmd.Flags().StringVar(&opts.language, "language", "", "audio language hint")
 	cmd.Flags().StringVar(&opts.hotwords, "hotwords", "", "hotword context text")
@@ -240,6 +251,8 @@ type transcribeOptions struct {
 	outputPath     string
 	stdout         bool
 	jsonOutput     bool
+	progress       bool
+	progressJSONL  bool
 	rawJSONPath    string
 	language       string
 	hotwords       string
@@ -436,6 +449,36 @@ func newSchemaCommand(state *rootState) *cobra.Command {
 					"cleanup_error":     map[string]string{"type": "string"},
 					"warnings":          map[string]any{"type": "array", "items": map[string]string{"type": "string"}},
 				},
+			})
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "progress-event",
+		Short: "Print progress event JSON Schema",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return writeJSON(state.deps.Stdout, map[string]any{
+				"$schema": "https://json-schema.org/draft/2020-12/schema",
+				"type":    "object",
+				"properties": map[string]any{
+					"ts":              map[string]string{"type": "string", "format": "date-time"},
+					"level":           map[string]string{"type": "string"},
+					"event":           map[string]string{"type": "string"},
+					"engine":          map[string]string{"type": "string"},
+					"run_id":          map[string]string{"type": "string"},
+					"step":            map[string]string{"type": "string"},
+					"message":         map[string]string{"type": "string"},
+					"elapsed_ms":      map[string]string{"type": "integer"},
+					"segment_index":   map[string]string{"type": "integer"},
+					"segment_total":   map[string]string{"type": "integer"},
+					"start_seconds":   map[string]string{"type": "number"},
+					"end_seconds":     map[string]string{"type": "number"},
+					"attempt":         map[string]string{"type": "integer"},
+					"backoff_seconds": map[string]string{"type": "number"},
+					"usage_seconds":   map[string]string{"type": "integer"},
+					"error_type":      map[string]string{"type": "string"},
+					"error":           map[string]string{"type": "string"},
+				},
+				"required": []string{"ts", "level", "event", "run_id"},
 			})
 		},
 	})

@@ -300,6 +300,45 @@ easy_asr transcribe input.mp3 --json
 
 stdout 是稳定 JSON；stderr 承载错误和诊断。Agent 不需要解析自然语言进度。
 
+如果 Agent 需要观察长任务阶段进展，使用 JSONL progress：
+
+```zsh
+easy_asr transcribe input.mp3 --json --progress-jsonl
+```
+
+此时 stdout 仍然只输出最终 run result JSON；stderr 每行输出一个 progress event JSON。事件结构可通过下面命令查看：
+
+```zsh
+easy_asr schema progress-event
+```
+
+核心字段：
+
+- `ts`：RFC3339Nano 时间戳。
+- `level`：`info`、`warn` 或 `error`。
+- `event`：稳定事件名，例如 `audio.normalize.completed`。
+- `engine`：ASR engine 名称。
+- `run_id`：单次运行 ID，用于关联同一命令的事件。
+- `step`：阶段名，例如 `upload`、`poll`、`vad`、`mimo_request`。
+- `elapsed_ms`：相对当前阶段或 run 的耗时毫秒。
+- `segment_index` / `segment_total`：MiMo segment 进度。
+- `attempt` / `backoff_seconds`：429 retry 等重试信息。
+- `usage_seconds`：ASR 返回的计费/处理音频时长。
+- `error_type` / `error`：失败事件的错误类型和错误文本。
+
+人类想看阶段进度但不需要 JSONL 时，可使用：
+
+```zsh
+easy_asr transcribe input.mp3 --progress
+```
+
+`--progress` 和 `--progress-jsonl` 互斥。
+
+主要事件节点：
+
+- MiMo：`audio.probe.started/completed`、`audio.normalize.started/completed`、`vad.detect.started/completed`、`audio.segment_plan.completed`、`audio.cut_segment.started/completed`、`mimo.segment.started/retry/completed/failed`、`srt.render.started/completed`、`cleanup.started/completed`。
+- Qwen3 / Fun-ASR：`storage.upload.started/completed`、`storage.presign.started/completed`、`dashscope.submit.started/completed`、`dashscope.poll.started/completed`、`transcription.download.started/completed`、`srt.render.started/completed`、`cleanup.started/completed`。
+
 ### 7.3 Exit code
 
 - `0`：成功。

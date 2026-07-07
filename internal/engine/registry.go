@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"github.com/aweffr/easy-asr-cli/internal/observe"
 )
 
 var ErrNotImplemented = errors.New("engine not implemented")
@@ -34,6 +36,7 @@ type Request struct {
 	VocabularyID       string
 	DiarizationEnabled bool
 	SpeakerCount       int
+	Observer           observe.Observer
 }
 
 type Result struct {

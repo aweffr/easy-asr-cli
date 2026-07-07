@@ -54,15 +54,24 @@ easy_asr doctor
 easy_asr transcribe input.mp3 --engine mimo-v2.5-asr
 easy_asr transcribe input.mp3 -o output.srt --raw-json output.raw.json
 easy_asr transcribe input.mp3 --json
+easy_asr transcribe input.mp3 --progress
+easy_asr transcribe input.mp3 --json --progress-jsonl
 easy_asr engines --json
 easy_asr config path
 easy_asr config validate
 easy_asr schema run-result
+easy_asr schema progress-event
 ```
 
 ## Agent-Friendly Output
 
 - Default stdout: one line, the SRT path.
 - `--json`: stable run result JSON.
+- `--progress`: human-readable progress events on stderr.
+- `--progress-jsonl`: machine-readable progress events on stderr, one JSON object per line.
 - Signed result URL query strings are redacted in command output.
 - Secret values are not printed by config commands.
+
+Progress events include stable fields such as `ts`, `level`, `event`, `engine`, `run_id`, `step`, `elapsed_ms`, segment indexes, retry attempt, backoff seconds, usage seconds, and error details. Use `easy_asr schema progress-event` for the JSONL event contract.
+
+MiMo emits detailed local preprocessing nodes for `ffprobe`, 16 kHz mono WAV normalization, Silero VAD detection, segment planning, per-segment cutting, MiMo request start/retry/completion, SRT rendering, and cleanup. DashScope engines emit upload, presign, submit, poll, download, render, and cleanup nodes.

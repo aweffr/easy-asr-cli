@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/aweffr/easy-asr-cli/internal/observe"
 )
 
 type SpeechSegment struct {
@@ -44,9 +46,13 @@ type Detector interface {
 }
 
 type Processor struct {
-	Detector Detector
-	Options  SegmentOptions
-	TempDir  string
+	Detector  Detector
+	Options   SegmentOptions
+	TempDir   string
+	Observer  observe.Observer
+	Probe     func(ctx context.Context, path string) (time.Duration, error)
+	Normalize func(ctx context.Context, inputPath string, outputPath string) error
+	Cut       func(ctx context.Context, inputPath string, outputPath string, start time.Duration, duration time.Duration) error
 
 	tempDir string
 }
@@ -97,33 +103,62 @@ func (p *Processor) Prepare(ctx context.Context, inputPath string) ([]PreparedSe
 	if p.Detector == nil {
 		return nil, fmt.Errorf("audio detector is required")
 	}
-	duration, err := ProbeDuration(ctx, inputPath)
+	probe := p.Probe
+	if probe == nil {
+		probe = ProbeDuration
+	}
+	normalize := p.Normalize
+	if normalize == nil {
+		normalize = NormalizeWAV
+	}
+	cut := p.Cut
+	if cut == nil {
+		cut = CutWAV
+	}
+	probeStart := time.Now()
+	emit(p.Observer, observe.Event{Event: "audio.probe.started", Step: "probe", Message: "probing audio duration"})
+	duration, err := probe(ctx, inputPath)
 	if err != nil {
+		emitFailed(p.Observer, "audio.probe.failed", "probe", probeStart, err)
 		return nil, err
 	}
+	emit(p.Observer, observe.Event{Event: "audio.probe.completed", Step: "probe", ElapsedMS: elapsedMS(probeStart), EndSeconds: duration.Seconds(), Message: "audio duration probed"})
 	tempDir, err := os.MkdirTemp(p.TempDir, "easy_asr-mimo-*")
 	if err != nil {
 		return nil, err
 	}
 	p.tempDir = tempDir
 	normalized := filepath.Join(tempDir, "normalized.wav")
-	if err := NormalizeWAV(ctx, inputPath, normalized); err != nil {
+	normalizeStart := time.Now()
+	emit(p.Observer, observe.Event{Event: "audio.normalize.started", Step: "normalize", Message: "normalizing audio to 16k mono WAV"})
+	if err := normalize(ctx, inputPath, normalized); err != nil {
+		emitFailed(p.Observer, "audio.normalize.failed", "normalize", normalizeStart, err)
 		_ = p.Cleanup()
 		return nil, err
 	}
+	emit(p.Observer, observe.Event{Event: "audio.normalize.completed", Step: "normalize", ElapsedMS: elapsedMS(normalizeStart), Message: "audio normalized to 16k mono WAV"})
+	vadStart := time.Now()
+	emit(p.Observer, observe.Event{Event: "vad.detect.started", Step: "vad", Message: "detecting speech regions"})
 	speech, err := p.Detector.Detect(ctx, normalized)
 	if err != nil {
+		emitFailed(p.Observer, "vad.detect.failed", "vad", vadStart, err)
 		_ = p.Cleanup()
 		return nil, err
 	}
+	emit(p.Observer, observe.Event{Event: "vad.detect.completed", Step: "vad", ElapsedMS: elapsedMS(vadStart), SegmentTotal: len(speech), Message: "speech regions detected"})
 	plan := PlanSegments(duration, speech, p.Options)
+	emit(p.Observer, observe.Event{Event: "audio.segment_plan.completed", Step: "segment_plan", SegmentTotal: len(plan), EndSeconds: duration.Seconds(), Message: "audio segment plan created"})
 	prepared := make([]PreparedSegment, 0, len(plan))
 	for _, segment := range plan {
 		path := filepath.Join(tempDir, fmt.Sprintf("part-%03d.wav", segment.Index))
-		if err := CutWAV(ctx, inputPath, path, segment.Start, segment.End-segment.Start); err != nil {
+		cutStart := time.Now()
+		emit(p.Observer, segmentEvent("audio.cut_segment.started", segment, observe.Event{Step: "cut", Message: "cutting audio segment"}))
+		if err := cut(ctx, inputPath, path, segment.Start, segment.End-segment.Start); err != nil {
+			emitFailed(p.Observer, "audio.cut_segment.failed", "cut", cutStart, err)
 			_ = p.Cleanup()
 			return nil, err
 		}
+		emit(p.Observer, segmentEvent("audio.cut_segment.completed", segment, observe.Event{Step: "cut", ElapsedMS: elapsedMS(cutStart), Message: "audio segment cut"}))
 		prepared = append(prepared, PreparedSegment{
 			Index: segment.Index,
 			Total: segment.Total,
@@ -133,6 +168,36 @@ func (p *Processor) Prepare(ctx context.Context, inputPath string) ([]PreparedSe
 		})
 	}
 	return prepared, nil
+}
+
+func emit(observer observe.Observer, event observe.Event) {
+	if observer != nil {
+		observer.Emit(event)
+	}
+}
+
+func emitFailed(observer observe.Observer, name string, step string, start time.Time, err error) {
+	emit(observer, observe.Event{
+		Event:     name,
+		Level:     "error",
+		Step:      step,
+		ElapsedMS: elapsedMS(start),
+		Error:     err.Error(),
+		ErrorType: fmt.Sprintf("%T", err),
+	})
+}
+
+func segmentEvent(name string, segment Segment, event observe.Event) observe.Event {
+	event.Event = name
+	event.SegmentIndex = segment.Index
+	event.SegmentTotal = segment.Total
+	event.StartSeconds = segment.Start.Seconds()
+	event.EndSeconds = segment.End.Seconds()
+	return event
+}
+
+func elapsedMS(start time.Time) int64 {
+	return time.Since(start).Milliseconds()
 }
 
 func (p *Processor) Cleanup() error {

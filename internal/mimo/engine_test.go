@@ -16,6 +16,7 @@ import (
 	"github.com/aweffr/easy-asr-cli/internal/config"
 	"github.com/aweffr/easy-asr-cli/internal/engine"
 	"github.com/aweffr/easy-asr-cli/internal/mimo"
+	"github.com/aweffr/easy-asr-cli/internal/observe"
 )
 
 func TestEngineTranscribesSegmentsWritesRawWrapperAndSRTLabels(t *testing.T) {
@@ -218,6 +219,60 @@ func TestEngineRetriesMimoHTTP429WithBackoff(t *testing.T) {
 	}
 }
 
+func TestEngineEmitsProgressEventsForMimoRetryAndSegmentCompletion(t *testing.T) {
+	dir := t.TempDir()
+	audioPath := filepath.Join(dir, "input.mp3")
+	segmentPath := filepath.Join(dir, "part.wav")
+	if err := os.WriteFile(audioPath, []byte("audio"), 0o600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	if err := os.WriteFile(segmentPath, []byte("part"), 0o600); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	recorder := &recordingObserver{}
+	runner := mimo.NewEngine(mimo.EngineOptions{
+		Config:            validMimoConfig(),
+		Processor:         &fakeProcessor{segments: []audio.PreparedSegment{{Index: 1, Total: 1, Start: 0, End: time.Second, Path: segmentPath}}},
+		Client:            &retryMimoClient{failures: 1},
+		MaxConcurrency:    1,
+		RequestStartDelay: -1,
+		RetryBackoffs:     []time.Duration{time.Millisecond},
+	})
+
+	_, err := runner.Transcribe(context.Background(), engine.Request{
+		AudioPath:  audioPath,
+		OutputPath: filepath.Join(dir, "out.srt"),
+		Observer:   recorder,
+	})
+	if err != nil {
+		t.Fatalf("Transcribe returned error: %v", err)
+	}
+	names := eventNames(recorder.events)
+	for _, want := range []string{
+		"asr.run.started",
+		"audio.preprocess.started",
+		"audio.preprocess.completed",
+		"mimo.segment.started",
+		"mimo.segment.retry",
+		"mimo.segment.completed",
+		"srt.render.started",
+		"srt.render.completed",
+		"asr.run.completed",
+	} {
+		if !contains(names, want) {
+			t.Fatalf("events missing %q: %#v", want, names)
+		}
+	}
+	retry := findEvent(recorder.events, "mimo.segment.retry")
+	if retry.SegmentIndex != 1 || retry.Attempt != 1 || retry.BackoffSeconds <= 0 {
+		t.Fatalf("retry event = %#v", retry)
+	}
+	completed := findEvent(recorder.events, "mimo.segment.completed")
+	if completed.SegmentIndex != 1 || completed.UsageSeconds != 1 || completed.ElapsedMS < 0 {
+		t.Fatalf("completed event = %#v", completed)
+	}
+}
+
 type fakeProcessor struct {
 	segments []audio.PreparedSegment
 	cleaned  bool
@@ -312,4 +367,38 @@ func mustBase64Decode(value string) string {
 		panic(err)
 	}
 	return string(body)
+}
+
+type recordingObserver struct {
+	events []observe.Event
+}
+
+func (r *recordingObserver) Emit(event observe.Event) {
+	r.events = append(r.events, event)
+}
+
+func eventNames(events []observe.Event) []string {
+	out := make([]string, 0, len(events))
+	for _, event := range events {
+		out = append(out, event.Event)
+	}
+	return out
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func findEvent(events []observe.Event, name string) observe.Event {
+	for _, event := range events {
+		if event.Event == name {
+			return event
+		}
+	}
+	return observe.Event{}
 }

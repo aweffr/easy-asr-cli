@@ -12,6 +12,7 @@ import (
 	"github.com/aweffr/easy-asr-cli/internal/cli"
 	"github.com/aweffr/easy-asr-cli/internal/config"
 	"github.com/aweffr/easy-asr-cli/internal/engine"
+	"github.com/aweffr/easy-asr-cli/internal/observe"
 )
 
 func TestTranscribeDefaultsToSiblingSRTAndPrintsOnlyPath(t *testing.T) {
@@ -88,6 +89,46 @@ func TestTranscribeJSONPrintsRunResult(t *testing.T) {
 	}
 }
 
+func TestTranscribeProgressJSONLWritesEventsToStderr(t *testing.T) {
+	dir := t.TempDir()
+	audio := filepath.Join(dir, "voice.mp3")
+	if err := os.WriteFile(audio, []byte("audio"), 0o600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	runner := &fakeRunner{
+		emitProgress: true,
+		result:       engine.Result{Engine: config.EngineQwen3Filetrans, TaskID: "task-1", OutputPath: filepath.Join(dir, "voice.srt")},
+	}
+	cmd := cli.NewRootCommand(cli.Deps{
+		Stdout:            &stdout,
+		Stderr:            &stderr,
+		DefaultConfigPath: func() (string, error) { return filepath.Join(dir, "config.yaml"), nil },
+		LoadConfig:        func(path string) (*config.Config, error) { return validConfig(), nil },
+		Registry:          func(cfg *config.Config) *engine.Registry { return engine.DefaultRegistry(runner) },
+	})
+	cmd.SetArgs([]string{"transcribe", "--json", "--progress-jsonl", audio})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	var payload engine.Result
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not run result JSON: %v\n%s", err, stdout.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stderr lines = %#v", lines)
+	}
+	var event observe.Event
+	if err := json.Unmarshal([]byte(lines[0]), &event); err != nil {
+		t.Fatalf("stderr line is not progress JSON: %v\n%s", err, stderr.String())
+	}
+	if event.Event != "test.progress" || event.RunID == "" || event.Timestamp == "" {
+		t.Fatalf("event = %#v", event)
+	}
+}
+
 func TestEnginesJSONListsImplementedEngines(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd := cli.NewRootCommand(cli.Deps{
@@ -111,6 +152,32 @@ func TestEnginesJSONListsImplementedEngines(t *testing.T) {
 	}
 	if infos[2].ReferencePriceCNYPerHour != 0.5 {
 		t.Fatalf("mimo reference price = %v", infos[2].ReferencePriceCNYPerHour)
+	}
+}
+
+func TestSchemaProgressEventPrintsMachineReadableContract(t *testing.T) {
+	var stdout bytes.Buffer
+	cmd := cli.NewRootCommand(cli.Deps{
+		Stdout:            &stdout,
+		Stderr:            &bytes.Buffer{},
+		DefaultConfigPath: func() (string, error) { return "/tmp/config.yaml", nil },
+		LoadConfig:        func(path string) (*config.Config, error) { return validConfig(), nil },
+		Registry:          func(cfg *config.Config) *engine.Registry { return engine.DefaultRegistry(&fakeRunner{}) },
+	})
+	cmd.SetArgs([]string{"schema", "progress-event"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	var payload struct {
+		Properties map[string]any `json:"properties"`
+		Required   []string       `json:"required"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON schema: %v\n%s", err, stdout.String())
+	}
+	if payload.Properties["event"] == nil || payload.Properties["elapsed_ms"] == nil || !containsString(payload.Required, "run_id") {
+		t.Fatalf("schema = %#v", payload)
 	}
 }
 
@@ -368,12 +435,16 @@ func TestExecuteMapsUsageErrorsToExitCodeTwo(t *testing.T) {
 }
 
 type fakeRunner struct {
-	request engine.Request
-	result  engine.Result
+	request      engine.Request
+	result       engine.Result
+	emitProgress bool
 }
 
 func (f *fakeRunner) Transcribe(ctx context.Context, request engine.Request) (engine.Result, error) {
 	f.request = request
+	if f.emitProgress && request.Observer != nil {
+		request.Observer.Emit(observe.Event{Level: "info", Event: "test.progress", Step: "test"})
+	}
 	if f.result.Engine == "" {
 		f.result = engine.Result{Engine: config.EngineQwen3Filetrans, OutputPath: request.OutputPath}
 	}
@@ -388,4 +459,13 @@ func validConfig() *config.Config {
 	qwen.OSS.AccessKeyID = "access"
 	qwen.OSS.AccessKeySecret = "secret"
 	return cfg
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
