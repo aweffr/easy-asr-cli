@@ -12,7 +12,7 @@
 1. 读取本地音频文件。
 2. 上传到配置中的对象存储。
 3. 生成临时可访问 URL。
-4. 调用 DashScope `qwen3-asr-flash-filetrans` 异步转写任务。
+4. 调用所选 DashScope ASR engine 的异步转写任务。
 5. 轮询任务直到完成或超时。
 6. 下载转写 JSON。
 7. 渲染 SRT。
@@ -110,6 +110,9 @@ easy_asr transcribe input.mp3 --stdout > input.srt
 --channel ints               音频 channel index，可重复
 --hotwords string            热词文本
 --hotwords-file string       从文件读取热词
+--vocabulary-id string       Fun-ASR 热词表 ID
+--no-diarization             关闭 Fun-ASR 说话人分离
+--speaker-count int          Fun-ASR 说话人数量参考值，范围 2 到 100
 --enable-itn                 启用 inverse text normalization
 --enable-words               启用词级时间戳，默认开启
 --no-enable-words            关闭词级时间戳
@@ -175,10 +178,13 @@ engines:
       poll_timeout: "2h0m0s"
       request_timeout: "30s"
   fun_asr:
-    enabled: false
-  seed_asr:
-    enabled: false
+    dashscope:
+      model: "fun-asr"
+    asr:
+      diarization_enabled: true
 ```
+
+`fun_asr` 默认继承 `qwen3_asr_flash_filetrans` 下的 DashScope API key、`base_url`、对象存储配置和轮询配置。只需要在 `fun_asr` 中写差异项，例如改模型、热词表 ID 或关闭说话人分离。
 
 当前本机配置已按可用对象存储和 DashScope key 填好。
 
@@ -217,10 +223,23 @@ easy_asr engines --json
 当前状态：
 
 - `qwen3-asr-flash-filetrans`：已实现，默认。
-- `fun-asr`：预留，未实现。
-- `seed-asr`：预留，未实现。
+- `fun-asr`：已实现，DashScope 异步 Fun-ASR 录音文件识别。
 
-如果指定未实现 engine，CLI 会返回 usage error。
+如果指定未知 engine，CLI 会返回 usage error。
+
+### 6.1 Fun-ASR 参数
+
+Fun-ASR 支持：
+
+- `--language zh`：映射到 `language_hints`。
+- `--channel 0`：映射到 `channel_id`。
+- `--vocabulary-id <id>`：使用百炼控制台创建的热词表。
+- `--speaker-count 2`：给说话人分离提供人数参考。
+- `--no-diarization`：关闭默认启用的说话人分离。
+
+Fun-ASR 不支持 Qwen3 专属的 `--hotwords`、`--hotwords-file`、`--enable-itn`、`--enable-words` 和 `--no-enable-words`。传入这些参数时 CLI 会返回 usage error。
+
+说话人分离仅适用于单声道或单个 channel。默认开启说话人分离时，如果传入多个 `--channel`，CLI 会在本地返回 usage error；如需多 channel 转写，请显式传入 `--no-diarization`。
 
 ## 7. 输出契约
 

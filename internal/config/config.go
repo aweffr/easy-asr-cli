@@ -13,9 +13,11 @@ import (
 
 const (
 	EngineQwen3Filetrans = "qwen3-asr-flash-filetrans"
+	EngineFunASR         = "fun-asr"
 
-	defaultBaseURL = "https://dashscope.aliyuncs.com/api/v1"
-	defaultModel   = EngineQwen3Filetrans
+	defaultBaseURL  = "https://dashscope.aliyuncs.com/api/v1"
+	defaultModel    = EngineQwen3Filetrans
+	defaultFunModel = EngineFunASR
 )
 
 type UsageError struct {
@@ -37,9 +39,8 @@ type Config struct {
 }
 
 type EnginesConfig struct {
-	Qwen3ASRFlashFiletrans Qwen3Config    `yaml:"qwen3_asr_flash_filetrans" json:"qwen3_asr_flash_filetrans"`
-	FunASR                 ReservedConfig `yaml:"fun_asr" json:"fun_asr"`
-	SeedASR                ReservedConfig `yaml:"seed_asr" json:"seed_asr"`
+	Qwen3ASRFlashFiletrans Qwen3Config  `yaml:"qwen3_asr_flash_filetrans" json:"qwen3_asr_flash_filetrans"`
+	FunASR                 FunASRConfig `yaml:"fun_asr" json:"fun_asr"`
 }
 
 type ReservedConfig struct {
@@ -50,6 +51,51 @@ type Qwen3Config struct {
 	DashScope DashScopeConfig `yaml:"dashscope" json:"dashscope"`
 	OSS       OSSConfig       `yaml:"oss" json:"oss"`
 	ASR       ASRConfig       `yaml:"asr" json:"asr"`
+}
+
+type FunASRConfig struct {
+	DashScope DashScopeConfig `yaml:"dashscope" json:"dashscope"`
+	OSS       OSSConfig       `yaml:"oss" json:"oss"`
+	ASR       FunASRConfigASR `yaml:"asr" json:"asr"`
+}
+
+type ResolvedFunASRConfig struct {
+	DashScope DashScopeConfig   `json:"dashscope"`
+	OSS       OSSConfig         `json:"oss"`
+	ASR       ResolvedFunASRASR `json:"asr"`
+}
+
+func (f FunASRConfig) MarshalYAML() (any, error) {
+	type dashScope struct {
+		APIKey  string `yaml:"api_key,omitempty"`
+		BaseURL string `yaml:"base_url,omitempty"`
+		Model   string `yaml:"model,omitempty"`
+	}
+	type raw struct {
+		DashScope dashScope       `yaml:"dashscope,omitempty"`
+		OSS       *OSSConfig      `yaml:"oss,omitempty"`
+		ASR       FunASRConfigASR `yaml:"asr,omitempty"`
+	}
+	var oss *OSSConfig
+	if f.OSS.Region != "" ||
+		f.OSS.Endpoint != "" ||
+		f.OSS.Bucket != "" ||
+		f.OSS.AccessKeyID != "" ||
+		f.OSS.AccessKeySecret != "" ||
+		f.OSS.KeyPrefix != "" ||
+		f.OSS.PresignTTL > 0 {
+		copy := f.OSS
+		oss = &copy
+	}
+	return raw{
+		DashScope: dashScope{
+			APIKey:  f.DashScope.APIKey,
+			BaseURL: f.DashScope.BaseURL,
+			Model:   f.DashScope.Model,
+		},
+		OSS: oss,
+		ASR: f.ASR,
+	}, nil
 }
 
 type DashScopeConfig struct {
@@ -76,6 +122,28 @@ type ASRConfig struct {
 	PollInterval   time.Duration `yaml:"poll_interval" json:"poll_interval"`
 	PollTimeout    time.Duration `yaml:"poll_timeout" json:"poll_timeout"`
 	RequestTimeout time.Duration `yaml:"request_timeout" json:"request_timeout"`
+}
+
+type FunASRConfigASR struct {
+	ChannelIDs         []int         `yaml:"channel_ids" json:"channel_ids"`
+	Language           string        `yaml:"language,omitempty" json:"language,omitempty"`
+	VocabularyID       string        `yaml:"vocabulary_id,omitempty" json:"vocabulary_id,omitempty"`
+	DiarizationEnabled *bool         `yaml:"diarization_enabled,omitempty" json:"diarization_enabled,omitempty"`
+	SpeakerCount       int           `yaml:"speaker_count,omitempty" json:"speaker_count,omitempty"`
+	PollInterval       time.Duration `yaml:"poll_interval" json:"poll_interval"`
+	PollTimeout        time.Duration `yaml:"poll_timeout" json:"poll_timeout"`
+	RequestTimeout     time.Duration `yaml:"request_timeout" json:"request_timeout"`
+}
+
+type ResolvedFunASRASR struct {
+	ChannelIDs         []int         `json:"channel_ids"`
+	Language           string        `json:"language,omitempty"`
+	VocabularyID       string        `json:"vocabulary_id,omitempty"`
+	DiarizationEnabled bool          `json:"diarization_enabled"`
+	SpeakerCount       int           `json:"speaker_count,omitempty"`
+	PollInterval       time.Duration `json:"poll_interval"`
+	PollTimeout        time.Duration `json:"poll_timeout"`
+	RequestTimeout     time.Duration `json:"request_timeout"`
 }
 
 func (o *OSSConfig) UnmarshalYAML(value *yaml.Node) error {
@@ -211,6 +279,90 @@ func (a ASRConfig) MarshalYAML() (any, error) {
 	}, nil
 }
 
+func (a *FunASRConfigASR) UnmarshalYAML(value *yaml.Node) error {
+	type raw struct {
+		ChannelIDs         []int  `yaml:"channel_ids"`
+		Language           string `yaml:"language"`
+		VocabularyID       string `yaml:"vocabulary_id"`
+		DiarizationEnabled *bool  `yaml:"diarization_enabled"`
+		SpeakerCount       int    `yaml:"speaker_count"`
+		PollInterval       string `yaml:"poll_interval"`
+		PollTimeout        string `yaml:"poll_timeout"`
+		RequestTimeout     string `yaml:"request_timeout"`
+	}
+	var r raw
+	if err := value.Decode(&r); err != nil {
+		return err
+	}
+	if len(r.ChannelIDs) > 0 {
+		a.ChannelIDs = r.ChannelIDs
+	}
+	if r.Language != "" {
+		a.Language = r.Language
+	}
+	if r.VocabularyID != "" {
+		a.VocabularyID = r.VocabularyID
+	}
+	if r.DiarizationEnabled != nil {
+		a.DiarizationEnabled = r.DiarizationEnabled
+	}
+	if r.SpeakerCount != 0 {
+		a.SpeakerCount = r.SpeakerCount
+	}
+	if r.PollInterval != "" {
+		duration, err := time.ParseDuration(r.PollInterval)
+		if err != nil {
+			return fmt.Errorf("parse asr.poll_interval: %w", err)
+		}
+		a.PollInterval = duration
+	}
+	if r.PollTimeout != "" {
+		duration, err := time.ParseDuration(r.PollTimeout)
+		if err != nil {
+			return fmt.Errorf("parse asr.poll_timeout: %w", err)
+		}
+		a.PollTimeout = duration
+	}
+	if r.RequestTimeout != "" {
+		duration, err := time.ParseDuration(r.RequestTimeout)
+		if err != nil {
+			return fmt.Errorf("parse asr.request_timeout: %w", err)
+		}
+		a.RequestTimeout = duration
+	}
+	return nil
+}
+
+func (a FunASRConfigASR) MarshalYAML() (any, error) {
+	type raw struct {
+		ChannelIDs         []int  `yaml:"channel_ids,omitempty"`
+		Language           string `yaml:"language,omitempty"`
+		VocabularyID       string `yaml:"vocabulary_id,omitempty"`
+		DiarizationEnabled *bool  `yaml:"diarization_enabled,omitempty"`
+		SpeakerCount       int    `yaml:"speaker_count,omitempty"`
+		PollInterval       string `yaml:"poll_interval,omitempty"`
+		PollTimeout        string `yaml:"poll_timeout,omitempty"`
+		RequestTimeout     string `yaml:"request_timeout,omitempty"`
+	}
+	out := raw{
+		ChannelIDs:         a.ChannelIDs,
+		Language:           a.Language,
+		VocabularyID:       a.VocabularyID,
+		DiarizationEnabled: a.DiarizationEnabled,
+		SpeakerCount:       a.SpeakerCount,
+	}
+	if a.PollInterval > 0 {
+		out.PollInterval = a.PollInterval.String()
+	}
+	if a.PollTimeout > 0 {
+		out.PollTimeout = a.PollTimeout.String()
+	}
+	if a.RequestTimeout > 0 {
+		out.RequestTimeout = a.RequestTimeout.String()
+	}
+	return out, nil
+}
+
 func DefaultPath() (string, error) {
 	if value := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); value != "" {
 		return filepath.Join(value, "easy_asr", "config.yaml"), nil
@@ -223,6 +375,7 @@ func DefaultPath() (string, error) {
 }
 
 func Default() *Config {
+	diarizationEnabled := true
 	return &Config{
 		Engine: EngineQwen3Filetrans,
 		Engines: EnginesConfig{
@@ -244,6 +397,14 @@ func Default() *Config {
 					PollInterval:   5 * time.Second,
 					PollTimeout:    2 * time.Hour,
 					RequestTimeout: 30 * time.Second,
+				},
+			},
+			FunASR: FunASRConfig{
+				DashScope: DashScopeConfig{
+					Model: defaultFunModel,
+				},
+				ASR: FunASRConfigASR{
+					DiarizationEnabled: &diarizationEnabled,
 				},
 			},
 		},
@@ -303,26 +464,122 @@ func (c *Config) Qwen3() *Qwen3Config {
 	return &c.Engines.Qwen3ASRFlashFiletrans
 }
 
+func (c *Config) FunASR() *ResolvedFunASRConfig {
+	qwen := c.Qwen3()
+	fun := c.Engines.FunASR
+	resolved := &ResolvedFunASRConfig{
+		DashScope: qwen.DashScope,
+		OSS:       qwen.OSS,
+		ASR: ResolvedFunASRASR{
+			ChannelIDs:         cloneInts(qwen.ASR.ChannelIDs),
+			Language:           qwen.ASR.Language,
+			DiarizationEnabled: true,
+			PollInterval:       qwen.ASR.PollInterval,
+			PollTimeout:        qwen.ASR.PollTimeout,
+			RequestTimeout:     qwen.ASR.RequestTimeout,
+		},
+	}
+	resolved.DashScope.Model = defaultFunModel
+	if strings.TrimSpace(fun.DashScope.APIKey) != "" {
+		resolved.DashScope.APIKey = fun.DashScope.APIKey
+	}
+	if strings.TrimSpace(fun.DashScope.BaseURL) != "" {
+		resolved.DashScope.BaseURL = fun.DashScope.BaseURL
+	}
+	if strings.TrimSpace(fun.DashScope.Model) != "" {
+		resolved.DashScope.Model = fun.DashScope.Model
+	}
+	if strings.TrimSpace(fun.OSS.Region) != "" {
+		resolved.OSS.Region = fun.OSS.Region
+	}
+	if strings.TrimSpace(fun.OSS.Endpoint) != "" {
+		resolved.OSS.Endpoint = fun.OSS.Endpoint
+	}
+	if strings.TrimSpace(fun.OSS.Bucket) != "" {
+		resolved.OSS.Bucket = fun.OSS.Bucket
+	}
+	if strings.TrimSpace(fun.OSS.AccessKeyID) != "" {
+		resolved.OSS.AccessKeyID = fun.OSS.AccessKeyID
+	}
+	if strings.TrimSpace(fun.OSS.AccessKeySecret) != "" {
+		resolved.OSS.AccessKeySecret = fun.OSS.AccessKeySecret
+	}
+	if strings.TrimSpace(fun.OSS.KeyPrefix) != "" {
+		resolved.OSS.KeyPrefix = fun.OSS.KeyPrefix
+	}
+	if fun.OSS.PresignTTL > 0 {
+		resolved.OSS.PresignTTL = fun.OSS.PresignTTL
+	}
+	if len(fun.ASR.ChannelIDs) > 0 {
+		resolved.ASR.ChannelIDs = cloneInts(fun.ASR.ChannelIDs)
+	}
+	if strings.TrimSpace(fun.ASR.Language) != "" {
+		resolved.ASR.Language = fun.ASR.Language
+	}
+	if strings.TrimSpace(fun.ASR.VocabularyID) != "" {
+		resolved.ASR.VocabularyID = fun.ASR.VocabularyID
+	}
+	if fun.ASR.DiarizationEnabled != nil {
+		resolved.ASR.DiarizationEnabled = *fun.ASR.DiarizationEnabled
+	}
+	if fun.ASR.SpeakerCount != 0 {
+		resolved.ASR.SpeakerCount = fun.ASR.SpeakerCount
+	}
+	if fun.ASR.PollInterval > 0 {
+		resolved.ASR.PollInterval = fun.ASR.PollInterval
+	}
+	if fun.ASR.PollTimeout > 0 {
+		resolved.ASR.PollTimeout = fun.ASR.PollTimeout
+	}
+	if fun.ASR.RequestTimeout > 0 {
+		resolved.ASR.RequestTimeout = fun.ASR.RequestTimeout
+	}
+	return resolved
+}
+
 func (c *Config) Validate() error {
 	if strings.TrimSpace(c.Engine) == "" {
 		return UsageError{Message: "engine is required"}
 	}
-	if c.Engine != EngineQwen3Filetrans {
+	if c.Engine != EngineQwen3Filetrans && c.Engine != EngineFunASR {
 		return UsageError{Message: fmt.Sprintf("engine %q is not implemented", c.Engine)}
 	}
+	if c.Engine == EngineFunASR {
+		fun := c.FunASR()
+		if err := validateDashScopeStorage(fun.DashScope, fun.OSS); err != nil {
+			return err
+		}
+		return validateFunASR(fun)
+	}
 	qwen := c.Qwen3()
+	return validateDashScopeStorage(qwen.DashScope, qwen.OSS)
+}
+
+func validateFunASR(fun *ResolvedFunASRConfig) error {
+	if fun.ASR.SpeakerCount != 0 && (fun.ASR.SpeakerCount < 2 || fun.ASR.SpeakerCount > 100) {
+		return UsageError{Message: "fun_asr.asr.speaker_count must be between 2 and 100"}
+	}
+	if fun.ASR.SpeakerCount != 0 && !fun.ASR.DiarizationEnabled {
+		return UsageError{Message: "fun_asr.asr.speaker_count requires diarization_enabled"}
+	}
+	return nil
+}
+
+func validateDashScopeStorage(dashScope DashScopeConfig, oss OSSConfig) error {
 	missing := []string{}
 	check := func(name, value string) {
 		if strings.TrimSpace(value) == "" {
 			missing = append(missing, name)
 		}
 	}
-	check("dashscope.api_key", qwen.DashScope.APIKey)
-	check("oss.region", qwen.OSS.Region)
-	check("oss.endpoint", qwen.OSS.Endpoint)
-	check("oss.bucket", qwen.OSS.Bucket)
-	check("oss.access_key_id", qwen.OSS.AccessKeyID)
-	check("oss.access_key_secret", qwen.OSS.AccessKeySecret)
+	check("dashscope.api_key", dashScope.APIKey)
+	check("dashscope.base_url", dashScope.BaseURL)
+	check("dashscope.model", dashScope.Model)
+	check("oss.region", oss.Region)
+	check("oss.endpoint", oss.Endpoint)
+	check("oss.bucket", oss.Bucket)
+	check("oss.access_key_id", oss.AccessKeyID)
+	check("oss.access_key_secret", oss.AccessKeySecret)
 	if len(missing) > 0 {
 		return UsageError{Message: "missing required config: " + strings.Join(missing, ", ")}
 	}
@@ -336,6 +593,9 @@ func (c *Config) Redacted() *Config {
 	qwen.DashScope.APIKey = redactSecret(qwen.DashScope.APIKey)
 	qwen.OSS.AccessKeyID = redactID(qwen.OSS.AccessKeyID)
 	qwen.OSS.AccessKeySecret = redactSecret(qwen.OSS.AccessKeySecret)
+	copy.Engines.FunASR.DashScope.APIKey = redactSecret(copy.Engines.FunASR.DashScope.APIKey)
+	copy.Engines.FunASR.OSS.AccessKeyID = redactID(copy.Engines.FunASR.OSS.AccessKeyID)
+	copy.Engines.FunASR.OSS.AccessKeySecret = redactSecret(copy.Engines.FunASR.OSS.AccessKeySecret)
 	return &copy
 }
 
@@ -380,6 +640,15 @@ func firstEnv(names ...string) string {
 		}
 	}
 	return ""
+}
+
+func cloneInts(values []int) []int {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]int, len(values))
+	copy(out, values)
+	return out
 }
 
 func redactSecret(value string) string {

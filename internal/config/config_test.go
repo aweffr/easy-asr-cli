@@ -81,6 +81,99 @@ engines:
 	}
 }
 
+func TestFunASRConfigInheritsQwen3DefaultsAndSupportsOverrides(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := []byte(`
+engine: fun-asr
+engines:
+  qwen3_asr_flash_filetrans:
+    dashscope:
+      api_key: qwen-key
+      base_url: https://dashscope.aliyuncs.com/api/v1
+      model: qwen3-asr-flash-filetrans
+    oss:
+      region: cn-shanghai
+      endpoint: https://oss-cn-shanghai.aliyuncs.com
+      bucket: qwen-bucket
+      access_key_id: qwen-access
+      access_key_secret: qwen-secret
+      key_prefix: qwen-prefix
+      presign_ttl: 12h
+    asr:
+      channel_ids: [0]
+      poll_interval: 3s
+      poll_timeout: 45m
+      request_timeout: 10s
+  fun_asr:
+    dashscope:
+      model: fun-asr-mtl
+    asr:
+      vocabulary_id: vocab-123
+      speaker_count: 3
+`)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	fun := cfg.FunASR()
+	if fun.DashScope.APIKey != "qwen-key" {
+		t.Fatalf("FunASR APIKey = %q", fun.DashScope.APIKey)
+	}
+	if fun.DashScope.Model != "fun-asr-mtl" {
+		t.Fatalf("FunASR model = %q", fun.DashScope.Model)
+	}
+	if fun.OSS.Bucket != "qwen-bucket" || fun.OSS.KeyPrefix != "qwen-prefix" {
+		t.Fatalf("FunASR OSS = %#v", fun.OSS)
+	}
+	if fun.ASR.PollInterval != 3*time.Second {
+		t.Fatalf("FunASR PollInterval = %s", fun.ASR.PollInterval)
+	}
+	if !fun.ASR.DiarizationEnabled {
+		t.Fatal("FunASR diarization should default to enabled")
+	}
+	if fun.ASR.VocabularyID != "vocab-123" || fun.ASR.SpeakerCount != 3 {
+		t.Fatalf("FunASR ASR = %#v", fun.ASR)
+	}
+}
+
+func TestValidateAcceptsFunASRWithInheritedCredentials(t *testing.T) {
+	cfg := config.Default()
+	cfg.Engine = config.EngineFunASR
+	qwen := cfg.Qwen3()
+	qwen.DashScope.APIKey = "dashscope-key"
+	qwen.OSS.Bucket = "bucket"
+	qwen.OSS.AccessKeyID = "access"
+	qwen.OSS.AccessKeySecret = "secret"
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+}
+
+func TestValidateRejectsInvalidFunASRSpeakerCount(t *testing.T) {
+	cfg := config.Default()
+	cfg.Engine = config.EngineFunASR
+	qwen := cfg.Qwen3()
+	qwen.DashScope.APIKey = "dashscope-key"
+	qwen.OSS.Bucket = "bucket"
+	qwen.OSS.AccessKeyID = "access"
+	qwen.OSS.AccessKeySecret = "secret"
+	cfg.Engines.FunASR.ASR.SpeakerCount = 101
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate returned nil error")
+	}
+	if !config.IsUsageError(err) {
+		t.Fatalf("error should be usage error, got %T: %v", err, err)
+	}
+}
+
 func TestValidateRequiresQwen3Credentials(t *testing.T) {
 	cfg := config.Default()
 	err := cfg.Validate()

@@ -270,6 +270,180 @@ func TestDownloadTranscriptionDecodesJSON(t *testing.T) {
 	}
 }
 
+func TestSubmitFunASRTaskBuildsPayloadWithParametersObject(t *testing.T) {
+	var gotPath string
+	var gotHeader http.Header
+	var gotPayload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotHeader = r.Header.Clone()
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"output":{"task_id":"task-fun"}}`))
+	}))
+	defer server.Close()
+
+	client := dashscope.NewFunASRClient(dashscope.FunASROptions{
+		APIKey:         "dashscope-key",
+		BaseURL:        server.URL + "/api/v1",
+		Model:          "fun-asr",
+		RequestTimeout: time.Second,
+	})
+
+	taskID, err := client.SubmitTask(context.Background(), dashscope.FunASRSubmitRequest{
+		FileURL:            "https://signed.example/audio.wav",
+		ChannelIDs:         []int{0},
+		Language:           "zh",
+		VocabularyID:       "vocab-123",
+		DiarizationEnabled: true,
+		SpeakerCount:       2,
+	})
+	if err != nil {
+		t.Fatalf("SubmitTask returned error: %v", err)
+	}
+	if taskID != "task-fun" {
+		t.Fatalf("taskID = %q", taskID)
+	}
+	if gotPath != "/api/v1/services/audio/asr/transcription" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if gotHeader.Get("Authorization") != "Bearer dashscope-key" {
+		t.Fatalf("Authorization header = %q", gotHeader.Get("Authorization"))
+	}
+	if gotHeader.Get("X-DashScope-Async") != "enable" {
+		t.Fatalf("X-DashScope-Async header = %q", gotHeader.Get("X-DashScope-Async"))
+	}
+	if gotPayload["model"] != "fun-asr" {
+		t.Fatalf("model = %#v", gotPayload["model"])
+	}
+	input := gotPayload["input"].(map[string]any)
+	fileURLs := input["file_urls"].([]any)
+	if len(fileURLs) != 1 || fileURLs[0] != "https://signed.example/audio.wav" {
+		t.Fatalf("input.file_urls = %#v", input["file_urls"])
+	}
+	parameters := gotPayload["parameters"].(map[string]any)
+	if parameters["vocabulary_id"] != "vocab-123" {
+		t.Fatalf("parameters.vocabulary_id = %#v", parameters["vocabulary_id"])
+	}
+	if parameters["diarization_enabled"] != true || parameters["speaker_count"] != float64(2) {
+		t.Fatalf("diarization parameters = %#v", parameters)
+	}
+	languageHints := parameters["language_hints"].([]any)
+	if len(languageHints) != 1 || languageHints[0] != "zh" {
+		t.Fatalf("language_hints = %#v", parameters["language_hints"])
+	}
+}
+
+func TestSubmitFunASRTaskSendsEmptyParametersObject(t *testing.T) {
+	var gotPayload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"output":{"task_id":"task-fun"}}`))
+	}))
+	defer server.Close()
+	client := dashscope.NewFunASRClient(dashscope.FunASROptions{
+		APIKey:  "dashscope-key",
+		BaseURL: server.URL + "/api/v1",
+		Model:   "fun-asr",
+	})
+
+	_, err := client.SubmitTask(context.Background(), dashscope.FunASRSubmitRequest{
+		FileURL: "https://signed.example/audio.wav",
+	})
+	if err != nil {
+		t.Fatalf("SubmitTask returned error: %v", err)
+	}
+	parameters, ok := gotPayload["parameters"].(map[string]any)
+	if !ok {
+		t.Fatalf("parameters should be an object, got %#v", gotPayload["parameters"])
+	}
+	if len(parameters) != 0 {
+		t.Fatalf("parameters should be empty, got %#v", parameters)
+	}
+}
+
+func TestWaitFunASRTaskExtractsSucceededSubtaskResult(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			_, _ = w.Write([]byte(`{"output":{"task_status":"RUNNING"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{
+			"request_id": "req-1",
+			"output": {
+				"task_id": "task-fun",
+				"task_status": "SUCCEEDED",
+				"results": [{
+					"file_url": "https://signed.example/audio.wav",
+					"transcription_url": "https://result.example/fun.json?sig=example",
+					"subtask_status": "SUCCEEDED"
+				}]
+			},
+			"usage": {"duration": 13}
+		}`))
+	}))
+	defer server.Close()
+	client := dashscope.NewFunASRClient(dashscope.FunASROptions{
+		APIKey:       "dashscope-key",
+		BaseURL:      server.URL + "/api/v1",
+		PollInterval: time.Nanosecond,
+	})
+
+	result, err := client.WaitTask(context.Background(), "task-fun", time.Second)
+	if err != nil {
+		t.Fatalf("WaitTask returned error: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d", calls)
+	}
+	if result.TaskID != "task-fun" {
+		t.Fatalf("TaskID = %q", result.TaskID)
+	}
+	if result.TranscriptionURL != "https://result.example/fun.json?sig=example" {
+		t.Fatalf("TranscriptionURL = %q", result.TranscriptionURL)
+	}
+	if result.UsageSeconds != 13 {
+		t.Fatalf("UsageSeconds = %d", result.UsageSeconds)
+	}
+}
+
+func TestWaitFunASRTaskReportsFailedSubtask(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"output": {
+				"task_id": "task-fun",
+				"task_status": "SUCCEEDED",
+				"results": [{
+					"subtask_status": "FAILED",
+					"code": "FILE_DOWNLOAD_FAILED",
+					"message": "download failed: https://signed.example/audio.wav?sig=example"
+				}]
+			}
+		}`))
+	}))
+	defer server.Close()
+	client := dashscope.NewFunASRClient(dashscope.FunASROptions{
+		APIKey:  "dashscope-key",
+		BaseURL: server.URL + "/api/v1",
+	})
+
+	_, err := client.WaitTask(context.Background(), "task-fun", time.Second)
+	if err == nil {
+		t.Fatal("WaitTask returned nil error")
+	}
+	if !strings.Contains(err.Error(), "FILE_DOWNLOAD_FAILED") {
+		t.Fatalf("error = %v", err)
+	}
+	if strings.Contains(err.Error(), "sig=example") {
+		t.Fatalf("error leaked signed URL query: %v", err)
+	}
+}
+
 type failingHTTPClient struct{}
 
 func (failingHTTPClient) Do(req *http.Request) (*http.Response, error) {

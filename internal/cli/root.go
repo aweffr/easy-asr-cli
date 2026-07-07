@@ -14,6 +14,7 @@ import (
 
 	"github.com/aweffr/easy-asr-cli/internal/config"
 	"github.com/aweffr/easy-asr-cli/internal/engine"
+	"github.com/aweffr/easy-asr-cli/internal/funasr"
 	"github.com/aweffr/easy-asr-cli/internal/qwen3"
 )
 
@@ -64,7 +65,10 @@ func fillDeps(deps Deps) Deps {
 	}
 	if deps.Registry == nil {
 		deps.Registry = func(cfg *config.Config) *engine.Registry {
-			return engine.DefaultRegistry(qwen3.NewEngine(qwen3.Options{Config: cfg.Qwen3()}))
+			return engine.DefaultRegistry(
+				qwen3.NewEngine(qwen3.Options{Config: cfg.Qwen3()}),
+				funasr.NewEngine(funasr.Options{Config: cfg.FunASR()}),
+			)
 		}
 	}
 	return deps
@@ -101,10 +105,18 @@ func newTranscribeCommand(state *rootState) *cobra.Command {
 				return err
 			}
 			engineName := firstNonEmpty(opts.engine, cfg.Engine)
-			if engineName == config.EngineQwen3Filetrans {
-				if err := cfg.Validate(); err != nil {
-					return err
-				}
+			if engineName == "" {
+				engineName = config.EngineQwen3Filetrans
+			}
+			cfg.Engine = engineName
+			if err := applyTimingFlagOverrides(cmd, cfg, opts); err != nil {
+				return err
+			}
+			if err := validateEngineFlags(cmd, cfg, engineName, opts); err != nil {
+				return err
+			}
+			if err := cfg.Validate(); err != nil {
+				return err
 			}
 			registry := state.deps.Registry(cfg)
 			runner, err := registry.Get(engineName)
@@ -135,24 +147,17 @@ func newTranscribeCommand(state *rootState) *cobra.Command {
 				defer os.Remove(tempOutput)
 			}
 			request := engine.Request{
-				AudioPath:   audioPath,
-				OutputPath:  outputPath,
-				RawJSONPath: opts.rawJSONPath,
-				KeepObject:  opts.keepObject,
-				Language:    opts.language,
-				Hotwords:    opts.hotwords,
-				Channels:    opts.channels,
+				AudioPath:    audioPath,
+				OutputPath:   outputPath,
+				RawJSONPath:  opts.rawJSONPath,
+				KeepObject:   opts.keepObject,
+				Language:     opts.language,
+				Hotwords:     opts.hotwords,
+				Channels:     opts.channels,
+				VocabularyID: opts.vocabularyID,
+				SpeakerCount: opts.speakerCount,
 			}
 			qwenCfg := cfg.Qwen3()
-			if cmd.Flags().Changed("poll-interval") {
-				qwenCfg.ASR.PollInterval = opts.pollInterval
-			}
-			if cmd.Flags().Changed("poll-timeout") {
-				qwenCfg.ASR.PollTimeout = opts.pollTimeout
-			}
-			if cmd.Flags().Changed("request-timeout") {
-				qwenCfg.ASR.RequestTimeout = opts.requestTimeout
-			}
 			request.EnableITN = qwenCfg.ASR.EnableITN
 			request.EnableWords = qwenCfg.ASR.EnableWords
 			if cmd.Flags().Changed("enable-itn") {
@@ -173,6 +178,16 @@ func newTranscribeCommand(state *rootState) *cobra.Command {
 					request.Hotwords += "\n"
 				}
 				request.Hotwords += strings.TrimSpace(string(body))
+			}
+			if engineName == config.EngineFunASR {
+				funCfg := cfg.FunASR()
+				request.DiarizationEnabled = funCfg.ASR.DiarizationEnabled
+				if opts.noDiarization {
+					request.DiarizationEnabled = false
+					request.SpeakerCount = 0
+				} else if request.SpeakerCount == 0 {
+					request.SpeakerCount = funCfg.ASR.SpeakerCount
+				}
 			}
 			result, err := runner.Transcribe(context.Background(), request)
 			if err != nil {
@@ -201,6 +216,9 @@ func newTranscribeCommand(state *rootState) *cobra.Command {
 	cmd.Flags().StringVar(&opts.language, "language", "", "audio language hint")
 	cmd.Flags().StringVar(&opts.hotwords, "hotwords", "", "hotword context text")
 	cmd.Flags().StringVar(&opts.hotwordsFile, "hotwords-file", "", "hotword context file")
+	cmd.Flags().StringVar(&opts.vocabularyID, "vocabulary-id", "", "Fun-ASR vocabulary id")
+	cmd.Flags().BoolVar(&opts.noDiarization, "no-diarization", false, "disable Fun-ASR speaker diarization")
+	cmd.Flags().IntVar(&opts.speakerCount, "speaker-count", 0, "Fun-ASR speaker count hint")
 	cmd.Flags().BoolVar(&opts.enableITN, "enable-itn", false, "enable inverse text normalization")
 	cmd.Flags().BoolVar(&opts.enableWords, "enable-words", true, "enable word timestamps")
 	cmd.Flags().BoolVar(&opts.noEnableWords, "no-enable-words", false, "disable word timestamps")
@@ -221,6 +239,9 @@ type transcribeOptions struct {
 	language       string
 	hotwords       string
 	hotwordsFile   string
+	vocabularyID   string
+	noDiarization  bool
+	speakerCount   int
 	enableITN      bool
 	enableWords    bool
 	noEnableWords  bool
@@ -355,6 +376,56 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func applyTimingFlagOverrides(cmd *cobra.Command, cfg *config.Config, opts transcribeOptions) error {
+	qwenCfg := cfg.Qwen3()
+	if cmd.Flags().Changed("poll-interval") {
+		qwenCfg.ASR.PollInterval = opts.pollInterval
+		cfg.Engines.FunASR.ASR.PollInterval = opts.pollInterval
+	}
+	if cmd.Flags().Changed("poll-timeout") {
+		qwenCfg.ASR.PollTimeout = opts.pollTimeout
+		cfg.Engines.FunASR.ASR.PollTimeout = opts.pollTimeout
+	}
+	if cmd.Flags().Changed("request-timeout") {
+		qwenCfg.ASR.RequestTimeout = opts.requestTimeout
+		cfg.Engines.FunASR.ASR.RequestTimeout = opts.requestTimeout
+	}
+	return nil
+}
+
+func validateEngineFlags(cmd *cobra.Command, cfg *config.Config, engineName string, opts transcribeOptions) error {
+	if engineName != config.EngineFunASR {
+		return nil
+	}
+	if strings.TrimSpace(opts.hotwords) != "" {
+		return engine.UsageError{Message: "fun-asr does not support --hotwords; use --vocabulary-id"}
+	}
+	if strings.TrimSpace(opts.hotwordsFile) != "" {
+		return engine.UsageError{Message: "fun-asr does not support --hotwords-file; use --vocabulary-id"}
+	}
+	for _, name := range []string{"enable-itn", "enable-words", "no-enable-words"} {
+		if cmd.Flags().Changed(name) {
+			return engine.UsageError{Message: fmt.Sprintf("fun-asr does not support --%s", name)}
+		}
+	}
+	if opts.speakerCount != 0 && (opts.speakerCount < 2 || opts.speakerCount > 100) {
+		return engine.UsageError{Message: "--speaker-count must be between 2 and 100"}
+	}
+	funCfg := cfg.FunASR()
+	diarizationEnabled := funCfg.ASR.DiarizationEnabled && !opts.noDiarization
+	if opts.speakerCount != 0 && !diarizationEnabled {
+		return engine.UsageError{Message: "--speaker-count requires Fun-ASR diarization"}
+	}
+	channels := opts.channels
+	if len(channels) == 0 {
+		channels = funCfg.ASR.ChannelIDs
+	}
+	if diarizationEnabled && len(channels) > 1 {
+		return engine.UsageError{Message: "fun-asr diarization supports only one channel; use one --channel or --no-diarization"}
+	}
+	return nil
 }
 
 func writeJSON(writer io.Writer, value any) error {

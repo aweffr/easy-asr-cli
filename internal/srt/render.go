@@ -26,6 +26,7 @@ type Sentence struct {
 	Language   string `json:"language,omitempty"`
 	Emotion    string `json:"emotion,omitempty"`
 	Text       string `json:"text"`
+	SpeakerID  *int   `json:"speaker_id,omitempty"`
 	Words      []Word `json:"words"`
 }
 
@@ -39,12 +40,14 @@ type Word struct {
 type Options struct {
 	MaxCueDuration int64
 	MaxCueRunes    int
+	SpeakerLabels  bool
 }
 
 type cue struct {
-	start int64
-	end   int64
-	text  string
+	start     int64
+	end       int64
+	text      string
+	speakerID *int
 }
 
 func Render(payload Transcription, options Options) (string, error) {
@@ -58,14 +61,14 @@ func Render(payload Transcription, options Options) (string, error) {
 	for _, transcript := range payload.Transcripts {
 		for _, sentence := range transcript.Sentences {
 			if len(sentence.Words) > 0 {
-				cues = append(cues, cuesFromWords(sentence.Words, options)...)
+				cues = append(cues, cuesFromWords(sentence, options)...)
 				continue
 			}
 			text := strings.TrimSpace(sentence.Text)
 			if text == "" || sentence.EndTime <= sentence.BeginTime {
 				continue
 			}
-			cues = append(cues, cue{start: sentence.BeginTime, end: sentence.EndTime, text: text})
+			cues = append(cues, cue{start: sentence.BeginTime, end: sentence.EndTime, text: text, speakerID: sentence.SpeakerID})
 		}
 	}
 	if len(cues) == 0 {
@@ -83,19 +86,23 @@ func Render(payload Transcription, options Options) (string, error) {
 		if i > 0 {
 			builder.WriteString("\n")
 		}
+		text := c.text
+		if options.SpeakerLabels && c.speakerID != nil {
+			text = fmt.Sprintf("[SPEAKER_%d] %s", *c.speakerID, text)
+		}
 		fmt.Fprintf(
 			&builder,
 			"%d\n%s --> %s\n%s\n",
 			i+1,
 			formatTimestamp(c.start),
 			formatTimestamp(c.end),
-			c.text,
+			text,
 		)
 	}
 	return builder.String(), nil
 }
 
-func cuesFromWords(words []Word, options Options) []cue {
+func cuesFromWords(sentence Sentence, options Options) []cue {
 	var out []cue
 	var current cue
 	flush := func() {
@@ -109,7 +116,7 @@ func cuesFromWords(words []Word, options Options) []cue {
 		}
 		current = cue{}
 	}
-	for _, word := range words {
+	for _, word := range sentence.Words {
 		text := strings.TrimSpace(word.Text)
 		if word.Punctuation != "" {
 			text += word.Punctuation
@@ -118,14 +125,14 @@ func cuesFromWords(words []Word, options Options) []cue {
 			continue
 		}
 		if current.text == "" {
-			current = cue{start: word.BeginTime, end: word.EndTime, text: text}
+			current = cue{start: word.BeginTime, end: word.EndTime, text: text, speakerID: sentence.SpeakerID}
 			continue
 		}
 		candidateDuration := word.EndTime - current.start
 		candidateRunes := utf8.RuneCountInString(current.text + text)
 		if candidateDuration > options.MaxCueDuration || candidateRunes > options.MaxCueRunes {
 			flush()
-			current = cue{start: word.BeginTime, end: word.EndTime, text: text}
+			current = cue{start: word.BeginTime, end: word.EndTime, text: text, speakerID: sentence.SpeakerID}
 			continue
 		}
 		current.end = word.EndTime

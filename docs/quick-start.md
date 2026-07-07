@@ -2,7 +2,10 @@
 
 `easy_asr` 是本机音频转字幕 CLI，用于把本地音频文件上传到对象存储后调用 ASR 引擎转写，并生成 `.srt` 字幕文件。
 
-当前默认并已实现的引擎是 `qwen3-asr-flash-filetrans`。`fun-asr` 和 `seed-asr` 已预留为后续扩展入口，本期不会调用。
+当前已实现的引擎：
+
+- `qwen3-asr-flash-filetrans`：默认引擎。
+- `fun-asr`：DashScope 异步 Fun-ASR 录音文件识别。
 
 ## 安装位置
 
@@ -53,6 +56,18 @@ easy_asr config validate
 
 ```zsh
 easy_asr transcribe input.mp3
+```
+
+使用 Fun-ASR：
+
+```zsh
+easy_asr transcribe input.mp3 --engine fun-asr
+```
+
+Fun-ASR 默认开启说话人分离；如果结果包含 `speaker_id`，SRT cue 会带 `[SPEAKER_0]` 这类标签。关闭说话人分离：
+
+```zsh
+easy_asr transcribe input.mp3 --engine fun-asr --no-diarization
 ```
 
 命令成功时，stdout 只输出生成的字幕文件绝对路径，方便脚本或 Agent 读取。

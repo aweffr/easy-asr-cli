@@ -2,10 +2,10 @@
 
 `easy_asr` is a Go/Cobra CLI for transcribing local audio files into SRT subtitles.
 
-The current implemented engine is `qwen3-asr-flash-filetrans`. Future engines are reserved in the registry:
+Implemented engines:
 
+- `qwen3-asr-flash-filetrans`
 - `fun-asr`
-- `seed-asr`
 
 ## Quick Start
 
@@ -18,7 +18,7 @@ go build -o bin/easy_asr ./cmd/easy_asr
 Default behavior:
 
 - Uploads the local audio file to configured object storage.
-- Passes a presigned public URL to DashScope `qwen3-asr-flash-filetrans`.
+- Passes a presigned public URL to the selected DashScope ASR engine.
 - Writes a sibling `.srt` file.
 - Prints only the absolute SRT path to stdout.
 - Writes progress/errors to stderr.
@@ -40,6 +40,7 @@ The config supports Aliyun OSS and S3-compatible storage endpoints. On this mach
 
 ```bash
 easy_asr transcribe input.mp3
+easy_asr transcribe input.mp3 --engine fun-asr
 easy_asr transcribe input.mp3 -o output.srt --raw-json output.raw.json
 easy_asr transcribe input.mp3 --json
 easy_asr engines --json
@@ -54,4 +55,3 @@ easy_asr schema run-result
 - `--json`: stable run result JSON.
 - Signed result URL query strings are redacted in command output.
 - Secret values are not printed by config commands.
-

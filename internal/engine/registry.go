@@ -22,15 +22,18 @@ func IsUsageError(err error) bool {
 }
 
 type Request struct {
-	AudioPath   string
-	OutputPath  string
-	RawJSONPath string
-	KeepObject  bool
-	Language    string
-	Hotwords    string
-	Channels    []int
-	EnableITN   bool
-	EnableWords bool
+	AudioPath          string
+	OutputPath         string
+	RawJSONPath        string
+	KeepObject         bool
+	Language           string
+	Hotwords           string
+	Channels           []int
+	EnableITN          bool
+	EnableWords        bool
+	VocabularyID       string
+	DiarizationEnabled bool
+	SpeakerCount       int
 }
 
 type Result struct {
@@ -67,11 +70,15 @@ type Registry struct {
 	runners     map[string]Runner
 }
 
-func DefaultRegistry(qwen Runner) *Registry {
+func DefaultRegistry(qwen Runner, fun ...Runner) *Registry {
 	if qwen == nil {
 		qwen = RunnerFunc(func(context.Context, Request) (Result, error) {
 			return Result{}, nil
 		})
+	}
+	funRunner := notImplementedRunner("fun-asr")
+	if len(fun) > 0 && fun[0] != nil {
+		funRunner = fun[0]
 	}
 	infos := []Info{
 		{
@@ -82,13 +89,8 @@ func DefaultRegistry(qwen Runner) *Registry {
 		},
 		{
 			Name:        "fun-asr",
-			Implemented: false,
-			Description: "Reserved Aliyun Fun-ASR engine",
-		},
-		{
-			Name:        "seed-asr",
-			Implemented: false,
-			Description: "Reserved Volcano Seed ASR engine",
+			Implemented: true,
+			Description: "Aliyun DashScope Fun-ASR async file transcription",
 		},
 	}
 	return &Registry{
@@ -96,8 +98,7 @@ func DefaultRegistry(qwen Runner) *Registry {
 		infos:       infos,
 		runners: map[string]Runner{
 			infos[0].Name: qwen,
-			infos[1].Name: notImplementedRunner(infos[1].Name),
-			infos[2].Name: notImplementedRunner(infos[2].Name),
+			infos[1].Name: funRunner,
 		},
 	}
 }

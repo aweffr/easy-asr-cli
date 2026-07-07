@@ -108,3 +108,30 @@ func TestRenderFailsWhenNoTimedCueExists(t *testing.T) {
 		t.Fatal("Render returned nil error for untimed transcription")
 	}
 }
+
+func TestRenderPrefixesEveryCueWithSpeakerLabel(t *testing.T) {
+	speakerID := 2
+	got, err := srt.Render(srt.Transcription{Transcripts: []srt.Transcript{{
+		Sentences: []srt.Sentence{{
+			BeginTime: 0,
+			EndTime:   7000,
+			Text:      "alpha beta gamma delta epsilon zeta eta",
+			SpeakerID: &speakerID,
+			Words: []srt.Word{
+				{BeginTime: 0, EndTime: 1000, Text: "alpha"},
+				{BeginTime: 1000, EndTime: 2000, Text: "beta"},
+				{BeginTime: 2000, EndTime: 3000, Text: "gamma"},
+				{BeginTime: 3000, EndTime: 4000, Text: "delta"},
+				{BeginTime: 4000, EndTime: 5000, Text: "epsilon"},
+				{BeginTime: 5000, EndTime: 6000, Text: "zeta"},
+				{BeginTime: 6000, EndTime: 7000, Text: "eta"},
+			},
+		}},
+	}}}, srt.Options{SpeakerLabels: true, MaxCueDuration: 2500})
+	if err != nil {
+		t.Fatalf("Render returned error: %v", err)
+	}
+	if strings.Count(got, "[SPEAKER_2]") != 4 {
+		t.Fatalf("speaker label should prefix every cue, got:\n%s", got)
+	}
+}

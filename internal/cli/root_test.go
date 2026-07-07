@@ -88,7 +88,7 @@ func TestTranscribeJSONPrintsRunResult(t *testing.T) {
 	}
 }
 
-func TestEnginesJSONListsReservedEngines(t *testing.T) {
+func TestEnginesJSONListsImplementedEngines(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd := cli.NewRootCommand(cli.Deps{
 		Stdout:            &stdout,
@@ -106,8 +106,147 @@ func TestEnginesJSONListsReservedEngines(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &infos); err != nil {
 		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
 	}
-	if len(infos) != 3 || infos[0].Name != config.EngineQwen3Filetrans || infos[1].Implemented {
+	if len(infos) != 2 || infos[0].Name != config.EngineQwen3Filetrans || infos[1].Name != config.EngineFunASR || !infos[1].Implemented {
 		t.Fatalf("infos = %#v", infos)
+	}
+}
+
+func TestTranscribeFunASRMapsFlags(t *testing.T) {
+	dir := t.TempDir()
+	audio := filepath.Join(dir, "voice.wav")
+	if err := os.WriteFile(audio, []byte("audio"), 0o600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	var stdout bytes.Buffer
+	runner := &fakeRunner{}
+	cmd := cli.NewRootCommand(cli.Deps{
+		Stdout:            &stdout,
+		Stderr:            &bytes.Buffer{},
+		DefaultConfigPath: func() (string, error) { return filepath.Join(dir, "config.yaml"), nil },
+		LoadConfig: func(path string) (*config.Config, error) {
+			cfg := validConfig()
+			cfg.Engine = config.EngineFunASR
+			return cfg, nil
+		},
+		Registry: func(cfg *config.Config) *engine.Registry {
+			return engine.DefaultRegistry(&fakeRunner{}, runner)
+		},
+	})
+	cmd.SetArgs([]string{
+		"transcribe",
+		"--engine", "fun-asr",
+		"--language", "zh",
+		"--channel", "0",
+		"--vocabulary-id", "vocab-123",
+		"--speaker-count", "2",
+		audio,
+	})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if runner.request.VocabularyID != "vocab-123" {
+		t.Fatalf("VocabularyID = %q", runner.request.VocabularyID)
+	}
+	if !runner.request.DiarizationEnabled {
+		t.Fatal("DiarizationEnabled should default to true for fun-asr")
+	}
+	if runner.request.SpeakerCount != 2 {
+		t.Fatalf("SpeakerCount = %d", runner.request.SpeakerCount)
+	}
+}
+
+func TestTranscribeFunASRRejectsQwenOnlyFlags(t *testing.T) {
+	dir := t.TempDir()
+	audio := filepath.Join(dir, "voice.wav")
+	if err := os.WriteFile(audio, []byte("audio"), 0o600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	cmd := cli.NewRootCommand(cli.Deps{
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		DefaultConfigPath: func() (string, error) { return filepath.Join(dir, "config.yaml"), nil },
+		LoadConfig: func(path string) (*config.Config, error) {
+			cfg := validConfig()
+			cfg.Engine = config.EngineFunASR
+			return cfg, nil
+		},
+		Registry: func(cfg *config.Config) *engine.Registry {
+			return engine.DefaultRegistry(&fakeRunner{}, &fakeRunner{})
+		},
+	})
+	cmd.SetArgs([]string{"transcribe", "--engine", "fun-asr", "--hotwords", "星巴克", audio})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute returned nil error")
+	}
+	if !engine.IsUsageError(err) {
+		t.Fatalf("error should be usage error, got %T: %v", err, err)
+	}
+}
+
+func TestTranscribeFunASRRejectsDiarizationWithMultipleChannels(t *testing.T) {
+	dir := t.TempDir()
+	audio := filepath.Join(dir, "voice.wav")
+	if err := os.WriteFile(audio, []byte("audio"), 0o600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	cmd := cli.NewRootCommand(cli.Deps{
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		DefaultConfigPath: func() (string, error) { return filepath.Join(dir, "config.yaml"), nil },
+		LoadConfig: func(path string) (*config.Config, error) {
+			cfg := validConfig()
+			cfg.Engine = config.EngineFunASR
+			return cfg, nil
+		},
+		Registry: func(cfg *config.Config) *engine.Registry {
+			return engine.DefaultRegistry(&fakeRunner{}, &fakeRunner{})
+		},
+	})
+	cmd.SetArgs([]string{"transcribe", "--engine", "fun-asr", "--channel", "0", "--channel", "1", audio})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute returned nil error")
+	}
+	if !engine.IsUsageError(err) {
+		t.Fatalf("error should be usage error, got %T: %v", err, err)
+	}
+}
+
+func TestTranscribeFunASRNoDiarizationClearsConfiguredSpeakerCount(t *testing.T) {
+	dir := t.TempDir()
+	audio := filepath.Join(dir, "voice.wav")
+	if err := os.WriteFile(audio, []byte("audio"), 0o600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	runner := &fakeRunner{}
+	cmd := cli.NewRootCommand(cli.Deps{
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		DefaultConfigPath: func() (string, error) { return filepath.Join(dir, "config.yaml"), nil },
+		LoadConfig: func(path string) (*config.Config, error) {
+			cfg := validConfig()
+			cfg.Engine = config.EngineFunASR
+			cfg.Engines.FunASR.ASR.SpeakerCount = 2
+			return cfg, nil
+		},
+		Registry: func(cfg *config.Config) *engine.Registry {
+			return engine.DefaultRegistry(&fakeRunner{}, runner)
+		},
+	})
+	cmd.SetArgs([]string{"transcribe", "--engine", "fun-asr", "--no-diarization", audio})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if runner.request.DiarizationEnabled {
+		t.Fatal("DiarizationEnabled should be false")
+	}
+	if runner.request.SpeakerCount != 0 {
+		t.Fatalf("SpeakerCount = %d, want 0", runner.request.SpeakerCount)
 	}
 }
 
